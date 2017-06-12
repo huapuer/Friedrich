@@ -3,6 +3,10 @@ TODO: XOR时延特性
 TODO: 打印DEBUG信息
 TODO: 激发函数，初始值
 TODO: HEBB权重增强
+
+DESG: 加入逻辑层，逻辑层引用物理层的一部分或全部数据
+	  物理层持有引用自己的逻辑层的引用，物理层被更新时负责同步更新逻辑层状态，并检查逻辑层输出并添加任务到调度器
+DESG: Host Scheduler与Slave Batch进行解耦，实现Host与Slave并行作业，隐藏Host端调度开销
 */
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
