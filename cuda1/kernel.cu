@@ -1,12 +1,12 @@
 /*
-TODO: XOR时延特性
-TODO: 打印DEBUG信息
 TODO: 激发函数，初始值
 TODO: HEBB权重增强
 
 DESG: 加入逻辑层，逻辑层引用物理层的一部分或全部数据
 	  物理层持有引用自己的逻辑层的引用，物理层被更新时负责同步更新逻辑层状态，并检查逻辑层输出并添加任务到调度器
 DESG: Host Scheduler与Slave Batch进行解耦，实现Host与Slave并行作业，隐藏Host端调度开销
+
+TODO: 增加物理层与所属逻辑层之间的状态同步逻辑
 */
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -16,14 +16,12 @@ DESG: Host Scheduler与Slave Batch进行解耦，实现Host与Slave并行作业，隐藏Host端调
 #include <Windows.h>
 #include <memory.h>
 
-#define error(stream,format,...) do{fprintf(stream,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
+#define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
 #define DEBUG
 
 enum layer_type {
-	LAYER_I,
-	LAYER_C,
-	LAYER_XOR,
-	LAYER_V
+	LAYER_PHSICAL,
+	LAYER_LOGICAL
 };
 
 enum execute_type {
@@ -46,6 +44,11 @@ struct gen_w {
 
 struct link;
 
+typedef void(*fp_integrate)(gen_t*, int);
+typedef void(*fp_mute)(gen_w*, const long long);
+typedef void(*fp_clear_push)(const gen_t *, gen_t *, int, gen_w*, const int, const long long);
+typedef void(*fp_push)(const gen_t*, gen_t*, int, gen_w*, const int, const long long);
+
 struct layer_t {
 	long long gen;
 	int id;
@@ -53,12 +56,21 @@ struct layer_t {
 	int size;
 	int integrating_batch;
 	int working_batch;
-	gen_t *t;
-	gen_t *dev_t;
-	const float* dev_atte;
 	link* pre;
 	link* next;
 	layer_t* follow;
+	fp_integrate integrate_fn;
+	fp_clear_push clear_push_fn;
+	fp_push push_fn;
+
+	//phsical
+	gen_t *t;
+	gen_t *dev_t;
+	const float* dev_atte;
+
+	//logical
+	layer_t* phsical;
+	int offset;
 };
 
 struct link {
@@ -90,14 +102,8 @@ int thread_num;
 layer_t* list = 0;
 layer_t* head = 0;
 
-__global__ void addKernel(int *c, const int *a, const int *b)
-{
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
-}
-
-__global__ void inte_i(gen_t* s) {
-	int i = threadIdx.x;
+__global__ void default_integrate(gen_t* s, int offset) {
+	int i = threadIdx.x + offset;
 	if (s[i].t > 3.0) {
 		s[i].t = 1.0;
 	}else {
@@ -105,25 +111,7 @@ __global__ void inte_i(gen_t* s) {
 	}
 }
 
-__global__ void inte_c(gen_t* s) {
-	int i = threadIdx.x;
-	if (s[i].t > 3.0) {
-		s[i].t = 1.0;
-	}else {
-		s[i].t = 0.0;
-	}
-}
-
-__global__ void inte_xor(gen_t* s) {
-	int i = threadIdx.x;
-	if (s[i].t == 2.0) {
-		s[i].t = 1.0;
-	}else {
-		s[i].t = 0.0;
-	}
-}
-
-__global__ void mute_w(gen_w* w, const long long gen) {
+__global__ void default_mute(gen_w* w, const long long gen) {
 	int i = threadIdx.x;
 	if (w[i].working_gen == gen) {
 		int gap = gen - w[i].gen;
@@ -140,9 +128,9 @@ __global__ void mute_w(gen_w* w, const long long gen) {
 	}
 }
 
-__global__ void i_2_atte_i(const gen_t *s, gen_t *t, gen_w* w, const int ss, const long long gen)
+__global__ void default_clear_push(const gen_t *s, gen_t *t, int to, gen_w* w, const int ss, const long long gen)
 {
-	int i = threadIdx.x;
+	int i = threadIdx.x + to;
 	for (int j = 0; j < ss; j++) {
 		t[i].t = 0.0;
 		if (s[j].t > 0.0) {
@@ -152,9 +140,9 @@ __global__ void i_2_atte_i(const gen_t *s, gen_t *t, gen_w* w, const int ss, con
 	}
 }
 
-__global__ void i_2_i(const gen_t *s, gen_t *t, gen_w* w, const int ss, const long long gen)
+__global__ void default_push(const gen_t *s, gen_t *t, int to, gen_w* w, const int ss, const long long gen)
 {
-	int i = threadIdx.x;
+	int i = threadIdx.x + to;
 	for (int j = 0; j < ss; j++) {
 		if (s[j].t > 0.0) {
 			t[i].t += s[j].t * w[i*j + j].t;
@@ -163,80 +151,40 @@ __global__ void i_2_i(const gen_t *s, gen_t *t, gen_w* w, const int ss, const lo
 	}
 }
 
-__global__ void i_2_c(const gen_t *s, gen_t *t, const float* atte, const long long gen)
-{
-	int i = threadIdx.x;
-	int gap = gen - t[i].gen;
-	if (gap > 10) {
-		t[i].t = 0.0;
+layer_t* pick_layer(int idx) {
+	if (!list) {
+		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", idx);
 	}
 	else {
-		t[i].t = t[i].t * pow((double)*atte, (double)gap);
+		if (list->id == idx) {
+			return list;
+		}
+		else {
+			layer_t* iter = list;
+			while (iter->follow) {
+				if (iter->follow->id == idx) {
+					return iter->follow;
+				}
+				iter = iter->follow;
+			}
+		}
 	}
-	t[i].t += s[i].t;
+	ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", idx);
 }
 
-__global__ void i_2_atte_xor(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t = 0.0;
-	t[i].t += s[i].t > 0 ? 1.0 : 0.0;
-}
-
-__global__ void i_2_xor(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t += s[i].t > 0 ? 1.0 : 0.0;
-}
-
-__global__ void c_2_atte_i(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t = 0.0;
-	t[i].t -= s[i].t;
-}
-
-__global__ void c_2_i(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t -= s[i].t;
-}
-
-__global__ void xor_2_atte_i(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t = 0.0;
-	t[i].t += s[i].t;
-}
-
-__global__ void xor_2_i(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t += s[i].t;
-}
-
-__global__ void v_2_atte_xor(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t = 0.0;
-	t[i].t += s[i].t > 0 ? 1.0 : 0.0;
-	//printf("DEBUG v_2_atte_xor %d: f=%f\n", threadIdx.x, t[i].t);
-}
-
-__global__ void v_2_xor(const gen_t *s, gen_t *t)
-{
-	int i = threadIdx.x;
-	t[i].t += s[i].t > 0 ? 1.0 : 0.0;
-}
-
-layer_t* new_layer(int id, layer_type type, int size,float atte=0.0) {
+layer_t* new_layer_phsical(int id, int size,float atte=0.0, fp_integrate inte_fn=default_integrate, fp_clear_push cl_p_fn=default_clear_push, fp_push p_fn=default_push) {
 	layer_t* ret = (layer_t*)malloc(sizeof(layer_t));
 	memset(ret, 0, sizeof(layer_t));
 	ret->id = id;
-	ret->type = type;
+	ret->type = LAYER_PHSICAL;
 	ret->size = size;
 	ret->gen = 0;
 	ret->working_batch = 0;
+	ret->offset = 0;
+	ret->integrate_fn = inte_fn;
+	ret->clear_push_fn = cl_p_fn;
+	ret->push_fn = p_fn;
+
 	if (atte > 0.0) {
 		cudaMemcpyToSymbol(ret->dev_atte, &atte, sizeof(int));
 	}
@@ -246,6 +194,37 @@ layer_t* new_layer(int id, layer_type type, int size,float atte=0.0) {
 		cudaMalloc((void**)&ret->dev_t, size * sizeof(gen_t));
 		cudaMemcpy(ret->dev_t, ret->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
 	}
+	if (!list) {
+		list = ret;
+	}
+	else {
+		layer_t* iter = list;
+		while (iter->follow) {
+			iter = iter->follow;
+		}
+		iter->follow = ret;
+	}
+	return ret;
+}
+
+layer_t* new_layer_logical(int id, int phsical, int offset, int size) {
+	layer_t* ret = (layer_t*)malloc(sizeof(layer_t));
+	memset(ret, 0, sizeof(layer_t));
+	ret->id = id;
+	ret->type = LAYER_LOGICAL;
+	ret->size = size;
+	ret->gen = 0;
+	ret->working_batch = 0;
+
+	layer_t* pl= pick_layer(phsical);
+	ret->phsical = pl;
+	ret->offset = offset;
+	ret->t = pl->t;
+	ret->dev_t = pl->dev_t;
+	ret->integrate_fn = pl->integrate_fn;
+	ret->clear_push_fn = pl->clear_push_fn;
+	ret->push_fn = pl->push_fn;
+
 	if (!list) {
 		list = ret;
 	}
@@ -271,27 +250,6 @@ link* new_link(layer_t* layer, int size) {
 	return ret;
 }
 
-layer_t* pick_layer(int idx) {
-	if (!list) {
-		error(stderr, "COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", idx);
-	}
-	else {
-		if (list->id == idx) {
-			return list;
-		}
-		else {
-			layer_t* iter = list;
-			while (iter->follow) {
-				if (iter->follow->id == idx) {
-					return iter->follow;
-				}
-				iter = iter->follow;
-			}
-		}
-	}
-	error(stderr, "COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", idx);
-}
-
 void add_link(link** head, link* next) {
 	if(!*head) {
 		*head = next;
@@ -312,83 +270,22 @@ layer_t* has_t(layer_t* s, int or_another_s, layer_t* next, int or_another_next)
 			head = s;
 		}
 		else {
-			error(stderr, "COMPILE ERROR: HEAD OF LAYER NOT EXSISTS!\n");
+			ERROR("COMPILE ERROR: HEAD OF LAYER NOT EXSISTS!\n");
 		}
 	}
 	if (or_another_s) {
 		s = pick_layer(or_another_s);
 	}
 	if (!s) {
-		error(stderr, "COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_s);
+		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_s);
 	}
 	if (or_another_next) {
 		next = pick_layer(or_another_next);
 	}
 	if (!next) {
-		error(stderr, "COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_next);
+		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_next);
 	}
-	int size = 0;
-	switch (s->type) {
-	case LAYER_I:
-		switch (next->type) {
-		case LAYER_I:
-			size = s->size*next->size;
-			break;
-		case LAYER_C:
-			if (s->size != next->size) {
-				error(stderr, "COMPILE ERROR: LAYER[%d] SIZE UNMATCHED!\n", next->id);
-			}
-			size = 0;
-			break;
-		case LAYER_XOR:
-			if (next->pre && next->pre->another) {
-				error(stderr, "COMPILE ERROR: XOR LAYER[%d] OUT OF INPUTS!\n", next->id);
-			}
-			size = 0;
-			break;
-		default:
-			error(stderr, "COMPILE ERROR: LAYER[%d] TYPE UNMATCHED!\n", next->id);
-		}
-		break;
-	case LAYER_C:
-		switch (next->type) {
-		case LAYER_I:
-			if (s->size != next->size) {
-				error(stderr, "COMPILE ERROR: LAYER[%d] SIZE UNMATCHED!\n", next->id);
-			}
-			size = 0;
-			break;
-		default:
-			error(stderr, "COMPILE ERROR: LAYER[%d] TYPE UNMATCHED!\n", next->id);
-		}
-		break;
-	case LAYER_XOR:
-		switch (next->type) {
-		case LAYER_I:
-			size = s->size*next->size;
-			break;
-		default:
-			error(stderr, "COMPILE ERROR: LAYER[%d] TYPE UNMATCHED!\n", next->id);
-		}
-		break;
-	case LAYER_V:
-		switch (next->type) {
-		case LAYER_XOR:
-			if (s->size != next->size) {
-				error(stderr, "COMPILE ERROR: LAYER[%d] SIZE UNMATCHED!\n", next->id);
-			}
-			if (next->pre && next->pre->another) {
-				error(stderr, "COMPILE ERROR: XOR LAYER[%d] OUT OF INPUTS!\n", next->id);
-			}
-			size = 0;
-			break;
-		default:
-			error(stderr, "COMPILE ERROR: LAYER[%d] TYPE UNMATCHED!\n", next->id);
-		}
-		break;
-	default:
-		error(stderr, "COMPILE ERROR: LAYER_TYPE[%d] UNDEFINED!\n", s->type);
-	}
+	int size = s->size*next->size;
 	link* l = new_link(next, size);
 	add_link(&s->next, l);
 	//add_link(&next->pre, l);
@@ -406,132 +303,49 @@ executable* new_executable(int gen, execute_type type, layer_t* s, link* l, laye
 	return ret;
 }
 
+fp_mute mute_fn;
+
 int launch_job(executable** head, executable** tail, executable* e, int gen, cudaStream_t stream) {
 	if (e->type == EXECUTE_LINK) {
-		mute_w <<<e->l->size / thread_num + 1, e->l->size>thread_num?thread_num:e->l->size, 0, stream >>> (e->l->dev_t, gen);
+		mute_fn <<<e->l->size / thread_num + 1, e->l->size>thread_num?thread_num:e->l->size, 0, stream >>> (e->l->dev_t, gen);
 		return 1;
 	}
-	switch (e->s->type) {
-	case LAYER_I:
-		if (e->s->gen < gen) {
-			inte_i <<<e->s->size / thread_num + 1, e->s->size>thread_num?thread_num:e->s->size, 0, stream>>> (e->s->dev_t);
-			e->s->gen = gen;
-			return 0;
+	if (e->s->gen < gen) {
+		e->s->integrate_fn <<<e->s->size / thread_num + 1, e->s->size>thread_num?thread_num:e->s->size, 0, stream>>> (e->s->dev_t, e->s->offset);
+		e->s->gen = gen;
+		return 0;
+	}
+	else {
+		if (e->t->gen < gen) {
+			e->s->clear_push_fn <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->t->offset, e->l->dev_t, e->s->size, gen);
+			//e->t->gen = gen;
 		}
 		else {
-			switch (e->t->type) {
-			case LAYER_I:
-				if (e->t->gen < gen) {
-					i_2_atte_i <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->l->dev_t, e->s->size, gen);
-					//e->t->gen = gen;
-				}
-				else {
-					i_2_i <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->l->dev_t, e->s->size, gen);
-				}
-				if (e->l->gen < gen) {
-					executable* n = new_executable(gen + 1, EXECUTE_LINK, e->s, e->l, e->l->layer);
-					/*
-					if (head) {
-						head->pre = n;
-						head->pre->next = head;
-						head = head->pre;
-					}
-					else {
-						head = n;
-					}
-					*/
-					if (*tail) {
-						(*tail)->next = n;
-						(*tail)->next->pre = *tail;
-						(*tail) = (*tail)->next;
-					}
-					else {
-						(*tail) = n;
-					}
-					e->l->gen = gen;
-				}
-				break;
-			case LAYER_C:
-				i_2_c <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>>(e->s->dev_t, e->t->dev_t, e->t->dev_atte, gen);
-				break;
-			case LAYER_XOR:
-				if (e->t->gen < gen) {
-					i_2_atte_xor <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
-					//e->t->gen = gen;
-				}
-				else {
-					i_2_xor <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
-				}
-				break;
-			default:
-				error(stderr, "EXECUTE ERROR: LAYER_TYPE[%d] UNDEFINED OR UNMATCHED!\n", e->t->type);
-			}
-			return 1;
+			e->s->push_fn <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->t->offset, e->l->dev_t, e->s->size, gen);
 		}
-		break;
-	case LAYER_C:
-		if (e->s->gen < gen) {
-			inte_c <<<e->s->size / thread_num + 1, e->s->size>thread_num?thread_num:e->s->size, 0, stream >>> (e->s->dev_t);
-			e->s->gen = gen;
-			return 0;
-		}
-		else {
-			switch (e->t->type) {
-			case LAYER_I:
-				if (e->t->gen < gen) {
-					c_2_atte_i <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
-					//e->t->gen = gen;
-				}
-				else {
-					c_2_i <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
-				}
-				break;
-			default:
-				error(stderr, "EXECUTE ERROR: LAYER_TYPE[%d] UNDEFINED OR UNMATCHED!\n", e->t->type);
-			}
-			return 1;
-		}
-		break;
-	case LAYER_XOR:
-		if (e->s->gen < gen) {
-			inte_xor <<<e->s->size / thread_num + 1, e->s->size>thread_num?thread_num:e->s->size, 0, stream >>> (e->s->dev_t);
-			e->s->gen = gen;
-			return 0;
-		}
-		else {
-			switch (e->t->type) {
-			case LAYER_I:
-				if (e->t->gen < gen) {
-					xor_2_atte_i <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
-					//e->t->gen = gen;
-				}
-				else {
-					xor_2_i <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
-				}
-				break;
-			default:
-				error(stderr, "EXECUTE ERROR: LAYER_TYPE[%d] UNDEFINED OR UNMATCHED!\n", e->t->type);
-			}
-			return 1;
-		}
-		break;
-	case LAYER_V:
-		switch (e->t->type) {
-		case LAYER_XOR:
-			if (e->t->gen < gen) {
-				v_2_atte_xor <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
-				//e->t->gen = gen;
+		if (e->l->gen < gen) {
+			executable* n = new_executable(gen + 1, EXECUTE_LINK, e->s, e->l, e->l->layer);
+			/*
+			if (head) {
+				head->pre = n;
+				head->pre->next = head;
+				head = head->pre;
 			}
 			else {
-				v_2_xor <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t);
+				head = n;
 			}
-			return 1;
-		default:
-			error(stderr, "EXECUTE ERROR: LAYER_TYPE[%d] UNDEFINED OR UNMATCHED!\n", e->t->type);
+			*/
+			if (*tail) {
+				(*tail)->next = n;
+				(*tail)->next->pre = *tail;
+				(*tail) = (*tail)->next;
+			}
+			else {
+				(*tail) = n;
+			}
+			e->l->gen = gen;
 		}
-		break;
-	default:
-		error(stderr, "EXECUTE ERROR: LAYER_TYPE[%d] UNDEFINED!\n", e->s->type);
+		return 1;
 	}
 }
 
@@ -677,7 +491,7 @@ int main(int argc, char* argv[])
 	cudaError_t cudaStatus;
 	cudaStatus = cudaSetDevice(0);
 	if (cudaStatus != cudaSuccess) {
-		error(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
+		ERROR("cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 		goto Error;
 	}
 	cudaDeviceProp properties;
@@ -688,15 +502,17 @@ int main(int argc, char* argv[])
 	float host_t[10] = { 1.0 };
 	cudaMemcpyToSymbol(w_mutes.dev_t, &host_t, w_mutes.size * sizeof(gen_w));
 
-	has_t(new_layer(0, LAYER_V, 1), 0, new_layer(1, LAYER_XOR, 1), 0);
-	has_t(NULL, 1, new_layer(2, LAYER_I, 2), 0);
-	has_t(NULL, 2, new_layer(3, LAYER_I, 2), 0);
-	has_t(NULL, 3, new_layer(4, LAYER_I, 2), 0);
-	has_t(NULL, 4, new_layer(5, LAYER_I, 1), 0);
-	has_t(NULL, 5, NULL, 1);
-	has_t(NULL, 4, new_layer(6, LAYER_I, 2), 0);
-	has_t(NULL, 3, new_layer(7, LAYER_C, 2), 0);
-	has_t(NULL, 7, NULL, 4);
+	mute_fn = default_mute;
+
+	has_t(new_layer_phsical(0, 1), 0, new_layer_logical(1, 0, 0, 1), 0);
+	//has_t(NULL, 1, new_layer(2, LAYER_I, 2), 0);
+	//has_t(NULL, 2, new_layer(3, LAYER_I, 2), 0);
+	//has_t(NULL, 3, new_layer(4, LAYER_I, 2), 0);
+	//has_t(NULL, 4, new_layer(5, LAYER_I, 1), 0);
+	//has_t(NULL, 5, NULL, 1);
+	//has_t(NULL, 4, new_layer(6, LAYER_I, 2), 0);
+	//has_t(NULL, 3, new_layer(7, LAYER_C, 2), 0);
+	//has_t(NULL, 7, NULL, 4);
 
 	float input = 1.0;
 	emmit_layer(head, &input);
@@ -706,7 +522,7 @@ int main(int argc, char* argv[])
 	// Copy output vector from GPU buffer to host memory.
 	//cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
 	//if (cudaStatus != cudaSuccess) {
-	//	error(stderr, "cudaMemcpy failed!");
+	//	ERROR("cudaMemcpy failed!");
 	//	goto Error;
 	//}
 
