@@ -67,10 +67,13 @@ struct layer_t {
 	gen_t *t;
 	gen_t *dev_t;
 	const float* dev_atte;
+	layer_t* logical_head;
+	layer_t* logical_tail;
 
 	//logical
-	layer_t* phsical;
 	int offset;
+	layer_t* phsical;
+	layer_t* next_logical;
 };
 
 struct link {
@@ -225,6 +228,17 @@ layer_t* new_layer_logical(int id, int phsical, int offset, int size) {
 	ret->clear_push_fn = pl->clear_push_fn;
 	ret->push_fn = pl->push_fn;
 
+	if (!pl->logical_head) {
+		pl->logical_head = ret;
+	}
+	if (pl->logical_tail) {
+		pl->logical_tail->next_logical = ret;
+		pl->logical_tail = pl->logical_tail->next_logical;
+	}
+	else {
+		pl->logical_tail = ret;
+	}
+
 	if (!list) {
 		list = ret;
 	}
@@ -265,21 +279,18 @@ void add_link(link** head, link* next) {
 }
 
 layer_t* has_t(layer_t* s, int or_another_s, layer_t* next, int or_another_next) {
-	if (!head) {
-		if (s) {
-			head = s;
-		}
-		else {
-			ERROR("COMPILE ERROR: HEAD OF LAYER NOT EXSISTS!\n");
-		}
-	}
-	if (or_another_s) {
+	if (!s) {
 		s = pick_layer(or_another_s);
 	}
 	if (!s) {
 		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_s);
 	}
-	if (or_another_next) {
+
+	if (!head) {
+		head = s;
+	}
+
+	if (!next) {
 		next = pick_layer(or_another_next);
 	}
 	if (!next) {
@@ -382,6 +393,18 @@ void execute(executable* e, int max_gen) {
 						fprintf(stdout, "GEN:%d BATCH:%d JOB:%d FROM:%d TO:%d FROM_WORKIN:%d TO_WORKING:%d\n", gen, batch, e->type, e->s->id, e->t->id, e->s->working_batch, e->t->working_batch);
 #endif
 						e->t->working_batch = batch;
+						switch (e->t->type) {
+						case LAYER_LOGICAL:
+							e->t->phsical->working_batch = batch;
+							break;
+						case LAYER_PHSICAL:
+							layer_t* next = e->t->logical_head;
+							while (next) {
+								next->working_batch = batch;
+								next = next->next_logical;
+							}
+							break;
+						}
 						if (e->pre) {
 							e->pre->next = e->next;
 							if (!e->pre->pre) {
@@ -430,6 +453,18 @@ void execute(executable* e, int max_gen) {
 								next = next->another;
 							}
 							e->t->gen = gen;
+							switch (e->t->type) {
+							case LAYER_LOGICAL:
+								e->t->phsical->gen = gen;
+								break;
+							case LAYER_PHSICAL:
+								layer_t* next = e->t->logical_head;
+								while (next) {
+									next->gen = gen;
+									next = next->next_logical;
+								}
+								break;
+							}
 						}
 						executable* f = e;
 						e = e->next;
@@ -438,6 +473,18 @@ void execute(executable* e, int max_gen) {
 					}
 					else {
 						e->s->integrating_batch = batch;
+						switch (e->s->type) {
+						case LAYER_LOGICAL:
+							e->s->phsical->integrating_batch = batch;
+							break;
+						case LAYER_PHSICAL:
+							layer_t* next = e->s->logical_head;
+							while (next) {
+								next->integrating_batch = batch;
+								next = next->next_logical;
+							}
+							break;
+						}
 #ifdef DEBUG
 						fprintf(stdout, "GEN:%d BATCH:%d JOB:%d FROM:%d TO:%d\n", gen, batch, EXECUTE_INTEGRATE, e->s->id, e->t->id);
 #endif
@@ -504,15 +551,9 @@ int main(int argc, char* argv[])
 
 	mute_fn = default_mute;
 
-	has_t(new_layer_phsical(0, 1), 0, new_layer_logical(1, 0, 0, 1), 0);
-	//has_t(NULL, 1, new_layer(2, LAYER_I, 2), 0);
-	//has_t(NULL, 2, new_layer(3, LAYER_I, 2), 0);
-	//has_t(NULL, 3, new_layer(4, LAYER_I, 2), 0);
-	//has_t(NULL, 4, new_layer(5, LAYER_I, 1), 0);
-	//has_t(NULL, 5, NULL, 1);
-	//has_t(NULL, 4, new_layer(6, LAYER_I, 2), 0);
-	//has_t(NULL, 3, new_layer(7, LAYER_C, 2), 0);
-	//has_t(NULL, 7, NULL, 4);
+	new_layer_phsical(0, 1);
+	has_t(NULL, 0, new_layer_logical(1, 0, 0, 1), 0);
+	has_t(NULL, 1, NULL, 0);
 
 	float input = 1.0;
 	emmit_layer(head, &input);
