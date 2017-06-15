@@ -6,7 +6,9 @@ DESG: 加入逻辑层，逻辑层引用物理层的一部分或全部数据
 	  物理层持有引用自己的逻辑层的引用，物理层被更新时负责同步更新逻辑层状态，并检查逻辑层输出并添加任务到调度器
 DESG: Host Scheduler与Slave Batch进行解耦，实现Host与Slave并行作业，隐藏Host端调度开销
 
-TODO: 增加物理层与所属逻辑层之间的状态同步逻辑
+TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug)
+TODO: 增加不同连接方式（1:1/n:n）
+TODO: 增加不更新权重连接支持（mute_fn为NULL）
 */
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -28,6 +30,13 @@ enum execute_type {
 	EXECUTE_LAYER,
 	EXECUTE_LINK,
 	EXECUTE_INTEGRATE
+};
+
+enum launch_type {
+	LAUNCH_INTEGRATE,
+	LAUNCH_PUSH,
+	LAUNCH_CLEAR_PUSH,
+	LAUNCH_MUTE_W
 };
 
 struct gen_t {
@@ -319,20 +328,22 @@ fp_mute mute_fn;
 int launch_job(executable** head, executable** tail, executable* e, int gen, cudaStream_t stream) {
 	if (e->type == EXECUTE_LINK) {
 		mute_fn <<<e->l->size / thread_num + 1, e->l->size>thread_num?thread_num:e->l->size, 0, stream >>> (e->l->dev_t, gen);
-		return 1;
+		return LAUNCH_MUTE_W;
 	}
 	if (e->s->gen < gen) {
 		e->s->integrate_fn <<<e->s->size / thread_num + 1, e->s->size>thread_num?thread_num:e->s->size, 0, stream>>> (e->s->dev_t, e->s->offset);
 		e->s->gen = gen;
-		return 0;
+		return LAUNCH_INTEGRATE;
 	}
 	else {
+		int ret = LAUNCH_CLEAR_PUSH;
 		if (e->t->gen < gen) {
 			e->s->clear_push_fn <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->t->offset, e->l->dev_t, e->s->size, gen);
 			//e->t->gen = gen;
 		}
 		else {
 			e->s->push_fn <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->t->offset, e->l->dev_t, e->s->size, gen);
+			ret = LAUNCH_PUSH;
 		}
 		if (e->l->gen < gen) {
 			executable* n = new_executable(gen + 1, EXECUTE_LINK, e->s, e->l, e->l->layer);
@@ -356,7 +367,7 @@ int launch_job(executable** head, executable** tail, executable* e, int gen, cud
 			}
 			e->l->gen = gen;
 		}
-		return 1;
+		return ret;
 	}
 }
 
@@ -371,6 +382,9 @@ void execute(executable* e, int max_gen) {
 	}
 	executable* head = e;
 	executable* tail = e;
+
+	char* LAUNCH_TYPE_DBG_STR[4] = { "INTE","PUSH","CLRP","MUTW" };
+
 	while (head) {
 		//critical region begin
 		//excute
@@ -388,9 +402,10 @@ void execute(executable* e, int max_gen) {
 		while (e && tasks < task_width) {
 			if (e->gen == gen && tasks < task_width) {
 				if (e->type == EXECUTE_LINK || (e->type==EXECUTE_LAYER && e->s->integrating_batch < batch && e->t->working_batch < batch)) {
-					if (launch_job(&head, &tail, e, gen, streams[tasks]) == 1) {
+					int ret = launch_job(&head, &tail, e, gen, streams[tasks]);
+					if ( ret != LAUNCH_INTEGRATE) {
 #ifdef DEBUG
-						fprintf(stdout, "GEN:%d BATCH:%d JOB:%d FROM:%d TO:%d FROM_WORKIN:%d TO_WORKING:%d\n", gen, batch, e->type, e->s->id, e->t->id, e->s->working_batch, e->t->working_batch);
+						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d FROM_WORKIN:%d TO_WORKING:%d\n", gen, batch, LAUNCH_TYPE_DBG_STR[ret], e->s->id, e->t->id, e->s->working_batch, e->t->working_batch);
 #endif
 						e->t->working_batch = batch;
 						switch (e->t->type) {
@@ -486,7 +501,7 @@ void execute(executable* e, int max_gen) {
 							break;
 						}
 #ifdef DEBUG
-						fprintf(stdout, "GEN:%d BATCH:%d JOB:%d FROM:%d TO:%d\n", gen, batch, EXECUTE_INTEGRATE, e->s->id, e->t->id);
+						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, LAUNCH_TYPE_DBG_STR[ret], e->s->id, e->t->id);
 #endif
 					}
 					tasks++;
@@ -551,14 +566,49 @@ int main(int argc, char* argv[])
 
 	mute_fn = default_mute;
 
-	new_layer_phsical(0, 1);
-	has_t(NULL, 0, new_layer_logical(1, 0, 0, 1), 0);
-	has_t(NULL, 1, NULL, 0);
+	new_layer_phsical(1, 9);
+	new_layer_logical(11, 1, 0, 3);
+	new_layer_logical(12, 1, 3, 3);
+	new_layer_logical(13, 1, 6, 3);
+
+	new_layer_phsical(21, 3);
+	new_layer_logical(210, 21, 0, 3);
+	new_layer_phsical(22, 3);
+	new_layer_logical(220, 22, 0, 3);
+	new_layer_phsical(23, 3);
+	new_layer_logical(230, 23, 0, 3);
+
+	new_layer_phsical(3, 3);
+	new_layer_logical(30, 3, 0, 3);
+	new_layer_logical(31, 3, 0, 1);
+	new_layer_logical(32, 3, 3, 1);
+	new_layer_logical(33, 3, 6, 1);
+
+	has_t(NULL, 11, NULL, 21);
+	has_t(NULL, 12, NULL, 22);
+	has_t(NULL, 13, NULL, 23);
+
+	has_t(NULL, 21, NULL, 31);
+	has_t(NULL, 210, NULL, 31);
+	has_t(NULL, 22, NULL, 32);
+	has_t(NULL, 220, NULL, 32);
+	has_t(NULL, 22, NULL, 33);
+	has_t(NULL, 220, NULL, 33);
+
+	has_t(NULL, 21, NULL, 210);
+	has_t(NULL, 210, NULL, 21);
+	has_t(NULL, 22, NULL, 220);
+	has_t(NULL, 220, NULL, 22);
+	has_t(NULL, 23, NULL, 230);
+	has_t(NULL, 230, NULL, 23);
+
+	has_t(NULL, 3, NULL, 30);
+	has_t(NULL, 30, NULL, 3);
 
 	float input = 1.0;
 	emmit_layer(head, &input);
 
-	execute(new_executable(1, EXECUTE_LAYER, head, head->next, head->next->layer),20);
+	execute(new_executable(1, EXECUTE_LAYER, head, head->next, head->next->layer),200);
 
 	// Copy output vector from GPU buffer to host memory.
 	//cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
