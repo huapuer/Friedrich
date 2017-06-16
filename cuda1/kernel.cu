@@ -6,7 +6,7 @@ DESG: 加入逻辑层，逻辑层引用物理层的一部分或全部数据
 	  物理层持有引用自己的逻辑层的引用，物理层被更新时负责同步更新逻辑层状态，并检查逻辑层输出并添加任务到调度器
 DESG: Host Scheduler与Slave Batch进行解耦，实现Host与Slave并行作业，隐藏Host端调度开销
 
-TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug)
+TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug), 部分完成，增加子逻辑层输出情况测试(layer1->layer2)
 TODO: 增加不同连接方式（1:1/n:n）
 TODO: 增加不更新权重连接支持（mute_fn为NULL）
 */
@@ -81,6 +81,7 @@ struct layer_t {
 
 	//logical
 	int offset;
+	bool delegate;
 	layer_t* phsical;
 	layer_t* next_logical;
 };
@@ -111,8 +112,7 @@ struct map {
 
 __constant__ map w_mutes;
 int thread_num;
-layer_t* list = 0;
-layer_t* head = 0;
+layer_t* layer_list = 0;
 
 __global__ void default_integrate(gen_t* s, int offset) {
 	int i = threadIdx.x + offset;
@@ -164,15 +164,15 @@ __global__ void default_push(const gen_t *s, gen_t *t, int to, gen_w* w, const i
 }
 
 layer_t* pick_layer(int idx) {
-	if (!list) {
+	if (!layer_list) {
 		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", idx);
 	}
 	else {
-		if (list->id == idx) {
-			return list;
+		if (layer_list->id == idx) {
+			return layer_list;
 		}
 		else {
-			layer_t* iter = list;
+			layer_t* iter = layer_list;
 			while (iter->follow) {
 				if (iter->follow->id == idx) {
 					return iter->follow;
@@ -206,11 +206,11 @@ layer_t* new_layer_phsical(int id, int size,float atte=0.0, fp_integrate inte_fn
 		cudaMalloc((void**)&ret->dev_t, size * sizeof(gen_t));
 		cudaMemcpy(ret->dev_t, ret->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
 	}
-	if (!list) {
-		list = ret;
+	if (!layer_list) {
+		layer_list = ret;
 	}
 	else {
-		layer_t* iter = list;
+		layer_t* iter = layer_list;
 		while (iter->follow) {
 			iter = iter->follow;
 		}
@@ -219,7 +219,7 @@ layer_t* new_layer_phsical(int id, int size,float atte=0.0, fp_integrate inte_fn
 	return ret;
 }
 
-layer_t* new_layer_logical(int id, int phsical, int offset, int size) {
+layer_t* new_layer_logical(int id, int phsical, int offset, int size, bool delegate) {
 	layer_t* ret = (layer_t*)malloc(sizeof(layer_t));
 	memset(ret, 0, sizeof(layer_t));
 	ret->id = id;
@@ -227,6 +227,7 @@ layer_t* new_layer_logical(int id, int phsical, int offset, int size) {
 	ret->size = size;
 	ret->gen = 0;
 	ret->working_batch = 0;
+	ret->delegate = delegate;
 
 	layer_t* pl= pick_layer(phsical);
 	ret->phsical = pl;
@@ -248,11 +249,11 @@ layer_t* new_layer_logical(int id, int phsical, int offset, int size) {
 		pl->logical_tail = ret;
 	}
 
-	if (!list) {
-		list = ret;
+	if (!layer_list) {
+		layer_list = ret;
 	}
 	else {
-		layer_t* iter = list;
+		layer_t* iter = layer_list;
 		while (iter->follow) {
 			iter = iter->follow;
 		}
@@ -293,10 +294,6 @@ layer_t* has_t(layer_t* s, int or_another_s, layer_t* next, int or_another_next)
 	}
 	if (!s) {
 		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_s);
-	}
-
-	if (!head) {
-		head = s;
 	}
 
 	if (!next) {
@@ -388,6 +385,7 @@ void execute(executable* e, int max_gen) {
 	while (head) {
 		//critical region begin
 		//excute
+		
 		if (head->gen > gen) {
 #ifdef DEBUG
 			if (gen >= max_gen) {
@@ -396,6 +394,24 @@ void execute(executable* e, int max_gen) {
 #endif
 			gen++;
 		}
+		
+		/*
+		executable* next_e = head;
+		while (next_e) {
+			if (next_e->gen == gen) {
+				break;
+			}
+			next_e = next_e->next;
+		}
+		if (!next_e) {
+#ifdef DEBUG
+			if (gen >= max_gen) {
+				break;
+			}
+#endif
+			gen++;
+		}
+		*/
 		batch++;
 		int tasks = 0;
 		e = head;
@@ -469,15 +485,64 @@ void execute(executable* e, int max_gen) {
 							}
 							e->t->gen = gen;
 							switch (e->t->type) {
-							case LAYER_LOGICAL:
-								e->t->phsical->gen = gen;
+							case LAYER_LOGICAL: {
+								if (e->t->phsical->gen < gen) {
+									if (!e->t->delegate) {
+										link* next = e->t->phsical->next;
+										while (next) {
+											executable* n = new_executable(gen + 1, EXECUTE_LAYER, e->t->phsical, next, next->layer);
+											if (!head) {
+												head = n;
+											}
+											if (tail) {
+												tail->next = n;
+												tail->next->pre = tail;
+												tail = tail->next;
+											}
+											else {
+												tail = n;
+											}
+											next = next->another;
+										}
+									}
+									e->t->phsical->gen = gen;
+								}
+								if (e->t->delegate) {
+									layer_t* next = e->t->phsical->logical_head;
+									while (next) {
+										next->gen = gen;
+										next = next->next_logical;
+									}
+								}
+							}
 								break;
-							case LAYER_PHSICAL:
+							case LAYER_PHSICAL: {
 								layer_t* next = e->t->logical_head;
 								while (next) {
-									next->gen = gen;
+									if (next->gen < gen) {
+										if (!next->delegate) {
+											link* next_link = next->next;
+											while (next_link) {
+												executable* n = new_executable(gen + 1, EXECUTE_LAYER, next, next_link, next_link->layer);
+												if (!head) {
+													head = n;
+												}
+												if (tail) {
+													tail->next = n;
+													tail->next->pre = tail;
+													tail = tail->next;
+												}
+												else {
+													tail = n;
+												}
+												next_link = next_link->another;
+											}
+										}
+										next->gen = gen;
+									}
 									next = next->next_logical;
 								}
+							}
 								break;
 							}
 						}
@@ -566,23 +631,27 @@ int main(int argc, char* argv[])
 
 	mute_fn = default_mute;
 
+	new_layer_phsical(0, 9);
+
 	new_layer_phsical(1, 9);
-	new_layer_logical(11, 1, 0, 3);
-	new_layer_logical(12, 1, 3, 3);
-	new_layer_logical(13, 1, 6, 3);
+	new_layer_logical(11, 1, 0, 3, false);
+	new_layer_logical(12, 1, 3, 3, false);
+	new_layer_logical(13, 1, 6, 3, false);
 
 	new_layer_phsical(21, 3);
-	new_layer_logical(210, 21, 0, 3);
+	new_layer_logical(210, 21, 0, 3, true);
 	new_layer_phsical(22, 3);
-	new_layer_logical(220, 22, 0, 3);
+	new_layer_logical(220, 22, 0, 3, true);
 	new_layer_phsical(23, 3);
-	new_layer_logical(230, 23, 0, 3);
+	new_layer_logical(230, 23, 0, 3, true);
 
 	new_layer_phsical(3, 3);
-	new_layer_logical(30, 3, 0, 3);
-	new_layer_logical(31, 3, 0, 1);
-	new_layer_logical(32, 3, 3, 1);
-	new_layer_logical(33, 3, 6, 1);
+	new_layer_logical(30, 3, 0, 3, true);
+	new_layer_logical(31, 3, 0, 1, false);
+	new_layer_logical(32, 3, 3, 1, false);
+	new_layer_logical(33, 3, 6, 1, false);
+
+	has_t(NULL, 0, NULL, 1);
 
 	has_t(NULL, 11, NULL, 21);
 	has_t(NULL, 12, NULL, 22);
@@ -592,8 +661,8 @@ int main(int argc, char* argv[])
 	has_t(NULL, 210, NULL, 31);
 	has_t(NULL, 22, NULL, 32);
 	has_t(NULL, 220, NULL, 32);
-	has_t(NULL, 22, NULL, 33);
-	has_t(NULL, 220, NULL, 33);
+	has_t(NULL, 23, NULL, 33);
+	has_t(NULL, 230, NULL, 33);
 
 	has_t(NULL, 21, NULL, 210);
 	has_t(NULL, 210, NULL, 21);
@@ -606,9 +675,9 @@ int main(int argc, char* argv[])
 	has_t(NULL, 30, NULL, 3);
 
 	float input = 1.0;
-	emmit_layer(head, &input);
+	emmit_layer(pick_layer(1), &input);
 
-	execute(new_executable(1, EXECUTE_LAYER, head, head->next, head->next->layer),200);
+	execute(new_executable(1, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer),200);
 
 	// Copy output vector from GPU buffer to host memory.
 	//cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
