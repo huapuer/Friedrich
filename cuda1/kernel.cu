@@ -59,8 +59,9 @@ typedef void(*fp_clear_push)(const gen_t *, gen_t *, int, gen_w*, const int, con
 typedef void(*fp_push)(const gen_t*, gen_t*, int, gen_w*, const int, const long long);
 
 struct layer_t {
-	long long gen;
 	int id;
+	long long integrate_gen;
+	long long working_gen;
 	layer_type type;
 	int size;
 	int integrating_batch;
@@ -190,7 +191,7 @@ layer_t* new_layer_phsical(int id, int size,float atte=0.0, fp_integrate inte_fn
 	ret->id = id;
 	ret->type = LAYER_PHSICAL;
 	ret->size = size;
-	ret->gen = 0;
+	ret->integrate_gen = 0;
 	ret->working_batch = 0;
 	ret->offset = 0;
 	ret->integrate_fn = inte_fn;
@@ -225,7 +226,7 @@ layer_t* new_layer_logical(int id, int phsical, int offset, int size, bool deleg
 	ret->id = id;
 	ret->type = LAYER_LOGICAL;
 	ret->size = size;
-	ret->gen = 0;
+	ret->integrate_gen = 0;
 	ret->working_batch = 0;
 	ret->delegate = delegate;
 
@@ -327,14 +328,14 @@ int launch_job(executable** head, executable** tail, executable* e, int gen, cud
 		mute_fn <<<e->l->size / thread_num + 1, e->l->size>thread_num?thread_num:e->l->size, 0, stream >>> (e->l->dev_t, gen);
 		return LAUNCH_MUTE_W;
 	}
-	if (e->s->gen < gen) {
+	if (e->s->integrate_gen < gen) {
 		e->s->integrate_fn <<<e->s->size / thread_num + 1, e->s->size>thread_num?thread_num:e->s->size, 0, stream>>> (e->s->dev_t, e->s->offset);
-		e->s->gen = gen;
+		e->s->integrate_gen = gen;
 		return LAUNCH_INTEGRATE;
 	}
 	else {
 		int ret = LAUNCH_CLEAR_PUSH;
-		if (e->t->gen < gen) {
+		if (e->t->working_gen < gen) {
 			e->s->clear_push_fn <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->t->offset, e->l->dev_t, e->s->size, gen);
 			//e->t->gen = gen;
 		}
@@ -393,6 +394,10 @@ void execute(executable* e, int max_gen) {
 			}
 #endif
 			gen++;
+
+			head->pre=new_executable(gen, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer);
+			head->pre->next = head;
+			head = head->pre;
 		}
 		
 		/*
@@ -417,7 +422,43 @@ void execute(executable* e, int max_gen) {
 		e = head;
 		while (e && tasks < task_width) {
 			if (e->gen == gen && tasks < task_width) {
-				if (e->type == EXECUTE_LINK || (e->type==EXECUTE_LAYER && e->s->integrating_batch < batch && e->t->working_batch < batch)) {
+				if (e->type == EXECUTE_LINK && e->t->working_batch < batch) {
+					int ret = launch_job(&head, &tail, e, gen, streams[tasks]);
+					tasks++;
+#ifdef DEBUG
+					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d FROM_WORKIN:%d TO_WORKING:%d\n", gen, batch, LAUNCH_TYPE_DBG_STR[ret], e->s->id, e->t->id, e->s->working_batch, e->t->working_batch);
+#endif
+					if (e->pre) {
+						e->pre->next = e->next;
+						if (!e->pre->pre) {
+							head = e->pre;
+							if (head) {
+								head->next = e->next;
+							}
+						}
+					}
+					else {
+						head = e->next;
+						if (head) {
+							head->next = e->next->next;
+						}
+					}
+					if (e->next) {
+						e->next->pre = e->pre;
+						if (!e->next->next) {
+							tail = e->next;
+							if (tail) {
+								tail->pre = e->pre;
+							}
+						}
+					}
+					else {
+						tail = e->pre;
+						if (tail) {
+							tail->pre = e->pre->pre;
+						}
+					}
+				}else if (e->type==EXECUTE_LAYER && e->s->integrating_batch < batch && e->t->working_batch < batch && e->t->integrating_batch!=batch-1) {
 					int ret = launch_job(&head, &tail, e, gen, streams[tasks]);
 					if ( ret != LAUNCH_INTEGRATE) {
 #ifdef DEBUG
@@ -466,7 +507,7 @@ void execute(executable* e, int max_gen) {
 								tail->pre = e->pre->pre;
 							}
 						}
-						if (e->type == EXECUTE_LAYER && e->t->gen < gen) {
+						if (e->type == EXECUTE_LAYER && e->t->working_gen < gen) {
 							link* next = e->t->next;
 							while (next) {
 								executable* n = new_executable(gen + 1, EXECUTE_LAYER, e->t, next, next->layer);
@@ -483,10 +524,10 @@ void execute(executable* e, int max_gen) {
 								}
 								next = next->another;
 							}
-							e->t->gen = gen;
+							e->t->working_gen = gen;
 							switch (e->t->type) {
 							case LAYER_LOGICAL: {
-								if (e->t->phsical->gen < gen) {
+								if (e->t->phsical->working_gen < gen) {
 									if (!e->t->delegate) {
 										link* next = e->t->phsical->next;
 										while (next) {
@@ -505,12 +546,12 @@ void execute(executable* e, int max_gen) {
 											next = next->another;
 										}
 									}
-									e->t->phsical->gen = gen;
+									e->t->phsical->working_gen = gen;
 								}
 								if (e->t->delegate) {
 									layer_t* next = e->t->phsical->logical_head;
 									while (next) {
-										next->gen = gen;
+										next->working_gen = gen;
 										next = next->next_logical;
 									}
 								}
@@ -519,7 +560,7 @@ void execute(executable* e, int max_gen) {
 							case LAYER_PHSICAL: {
 								layer_t* next = e->t->logical_head;
 								while (next) {
-									if (next->gen < gen) {
+									if (next->working_gen < gen) {
 										if (!next->delegate) {
 											link* next_link = next->next;
 											while (next_link) {
@@ -538,7 +579,7 @@ void execute(executable* e, int max_gen) {
 												next_link = next_link->another;
 											}
 										}
-										next->gen = gen;
+										next->working_gen = gen;
 									}
 									next = next->next_logical;
 								}
