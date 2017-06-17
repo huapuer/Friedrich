@@ -28,15 +28,20 @@ enum layer_type {
 
 enum execute_type {
 	EXECUTE_LAYER,
-	EXECUTE_LINK,
-	EXECUTE_INTEGRATE
+	EXECUTE_LINK
 };
 
-enum launch_type {
-	LAUNCH_INTEGRATE,
-	LAUNCH_PUSH,
-	LAUNCH_CLEAR_PUSH,
-	LAUNCH_MUTE_W
+enum layer_state {
+	LAYER_STATE_INACTIVE,
+	LAYER_STATE_INTEGRATE_ARRANGED,
+	LAYER_STATE_INTEGRATING,
+	LAYER_STATE_INTEGRATED,
+	LAYER_STATE_EMITED
+};
+
+enum link_state {
+	LINK_STATE_MUTATING,
+	LINK_STATE_MUTATED
 };
 
 struct gen_t {
@@ -60,12 +65,9 @@ typedef void(*fp_push)(const gen_t*, gen_t*, int, gen_w*, const int, const long 
 
 struct layer_t {
 	int id;
-	long long integrate_gen;
-	long long working_gen;
+	layer_state state;
 	layer_type type;
 	int size;
-	int integrating_batch;
-	int working_batch;
 	link* pre;
 	link* next;
 	layer_t* follow;
@@ -89,6 +91,7 @@ struct layer_t {
 
 struct link {
 	long long gen;
+	link_state state;
 	layer_t* layer;
 	int size;
 	gen_w* t;
@@ -191,8 +194,7 @@ layer_t* new_layer_phsical(int id, int size,float atte=0.0, fp_integrate inte_fn
 	ret->id = id;
 	ret->type = LAYER_PHSICAL;
 	ret->size = size;
-	ret->integrate_gen = 0;
-	ret->working_batch = 0;
+	ret->state = LAYER_STATE_INACTIVE;
 	ret->offset = 0;
 	ret->integrate_fn = inte_fn;
 	ret->clear_push_fn = cl_p_fn;
@@ -226,8 +228,7 @@ layer_t* new_layer_logical(int id, int phsical, int offset, int size, bool deleg
 	ret->id = id;
 	ret->type = LAYER_LOGICAL;
 	ret->size = size;
-	ret->integrate_gen = 0;
-	ret->working_batch = 0;
+	ret->state = LAYER_STATE_INACTIVE;
 	ret->delegate = delegate;
 
 	layer_t* pl= pick_layer(phsical);
@@ -266,6 +267,7 @@ layer_t* new_layer_logical(int id, int phsical, int offset, int size, bool deleg
 link* new_link(layer_t* layer, int size) {
 	link* ret = (link*)malloc(sizeof(link));
 	memset(ret, 0, sizeof(link));
+	ret->state = LINK_STATE_MUTATED;
 	ret->layer = layer;
 	ret->size = size;
 	ret->t = (gen_w*)malloc(sizeof(gen_w)*size);
@@ -323,71 +325,79 @@ executable* new_executable(int gen, execute_type type, layer_t* s, link* l, laye
 
 fp_mute mute_fn;
 
-int launch_job(executable** head, executable** tail, executable* e, int gen, cudaStream_t stream) {
-	if (e->type == EXECUTE_LINK) {
-		mute_fn <<<e->l->size / thread_num + 1, e->l->size>thread_num?thread_num:e->l->size, 0, stream >>> (e->l->dev_t, gen);
-		return LAUNCH_MUTE_W;
+void append_executable(executable** head, executable** tail, executable* n) {
+	if (!*head) {
+		*head = n;
 	}
-	if (e->s->integrate_gen < gen) {
-		e->s->integrate_fn <<<e->s->size / thread_num + 1, e->s->size>thread_num?thread_num:e->s->size, 0, stream>>> (e->s->dev_t, e->s->offset);
-		e->s->integrate_gen = gen;
-		return LAUNCH_INTEGRATE;
+	if (*tail) {
+		(*tail)->next = n;
+		(*tail)->next->pre = *tail;
+		(*tail) = (*tail)->next;
 	}
 	else {
-		int ret = LAUNCH_CLEAR_PUSH;
-		if (e->t->working_gen < gen) {
-			e->s->clear_push_fn <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->t->offset, e->l->dev_t, e->s->size, gen);
-			//e->t->gen = gen;
-		}
-		else {
-			e->s->push_fn <<<e->t->size / thread_num + 1, e->t->size>thread_num?thread_num:e->t->size, 0, stream >>> (e->s->dev_t, e->t->dev_t, e->t->offset, e->l->dev_t, e->s->size, gen);
-			ret = LAUNCH_PUSH;
-		}
-		if (e->l->gen < gen) {
-			executable* n = new_executable(gen + 1, EXECUTE_LINK, e->s, e->l, e->l->layer);
-			/*
-			if (head) {
-				head->pre = n;
-				head->pre->next = head;
-				head = head->pre;
-			}
-			else {
-				head = n;
-			}
-			*/
-			if (*tail) {
-				(*tail)->next = n;
-				(*tail)->next->pre = *tail;
-				(*tail) = (*tail)->next;
-			}
-			else {
-				(*tail) = n;
-			}
-			e->l->gen = gen;
-		}
-		return ret;
+		*tail = n;
 	}
 }
 
-void execute(executable* e, int max_gen) {
+void remove_executable(executable** head, executable** tail, executable* e) {
+	if (e->pre) {
+		e->pre->next = e->next;
+		if (!e->pre->pre) {
+			*head = e->pre;
+			if (*head) {
+				(*head)->next = e->next;
+			}
+		}
+	}
+	else {
+		*head = e->next;
+		if (*head) {
+			(*head)->next = e->next->next;
+		}
+	}
+	if (e->next) {
+		e->next->pre = e->pre;
+		if (!e->next->next) {
+			*tail = e->next;
+			if (*tail) {
+				(*tail)->pre = e->pre;
+			}
+		}
+	}
+	else {
+		*tail = e->pre;
+		if (*tail) {
+			(*tail)->pre = e->pre->pre;
+		}
+	}
+}
+
+void execute(executable* head, int max_gen) {
 	long long gen = 1;
 	long long batch = 0;
 	const int task_width = 10;
+	int tasks = 0;
 	cudaStream_t streams[task_width];
 	for (int i = 0; i<task_width; i++)
 	{
 		cudaStreamCreate(&streams[i]);
 	}
-	executable* head = e;
-	executable* tail = e;
 
-	char* LAUNCH_TYPE_DBG_STR[4] = { "INTE","PUSH","CLRP","MUTW" };
+	executable* link_task_head = NULL;
+	executable* link_task_tail = NULL;
+	executable* layer_task_head = head;
+	executable* layer_task_tail = head;
+	executable* inqueue_task_head = NULL;
+	executable* inqueue_task_tail = NULL;
 
-	while (head) {
+	while (layer_task_head) {
 		//critical region begin
 		//excute
 		
-		if (head->gen > gen) {
+		batch++;
+		tasks = 0;
+
+		if (layer_task_head->gen > gen) {
 #ifdef DEBUG
 			if (gen >= max_gen) {
 				break;
@@ -395,242 +405,159 @@ void execute(executable* e, int max_gen) {
 #endif
 			gen++;
 
-			head->pre=new_executable(gen, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer);
-			head->pre->next = head;
-			head = head->pre;
-		}
-		
-		/*
-		executable* next_e = head;
-		while (next_e) {
-			if (next_e->gen == gen) {
-				break;
-			}
-			next_e = next_e->next;
-		}
-		if (!next_e) {
-#ifdef DEBUG
-			if (gen >= max_gen) {
-				break;
-			}
-#endif
-			gen++;
-		}
-		*/
-		batch++;
-		int tasks = 0;
-		e = head;
-		while (e && tasks < task_width) {
-			if (e->gen == gen && tasks < task_width) {
-				if (e->type == EXECUTE_LINK && e->t->working_batch < batch) {
-					int ret = launch_job(&head, &tail, e, gen, streams[tasks]);
+			executable* link_task = link_task_head;
+			while (link_task) {			
+				while (link_task && tasks < task_width) {
+					mute_fn << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t, gen);
+					remove_executable(&link_task_head, &link_task_tail, link_task);
+					append_executable(&inqueue_task_head, &inqueue_task_tail, link_task);
 					tasks++;
+					link_task->l->state = LINK_STATE_MUTATING;
 #ifdef DEBUG
-					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d FROM_WORKIN:%d TO_WORKING:%d\n", gen, batch, LAUNCH_TYPE_DBG_STR[ret], e->s->id, e->t->id, e->s->working_batch, e->t->working_batch);
+					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "MUTW", link_task->s->id, link_task->t->id);
 #endif
-					if (e->pre) {
-						e->pre->next = e->next;
-						if (!e->pre->pre) {
-							head = e->pre;
-							if (head) {
-								head->next = e->next;
-							}
-						}
+					link_task = link_task->next;
+				}
+				if (tasks == task_width) {
+					for (int i = 0; i < tasks; i++) {
+						cudaStreamSynchronize(streams[i]);
 					}
-					else {
-						head = e->next;
-						if (head) {
-							head->next = e->next->next;
-						}
-					}
-					if (e->next) {
-						e->next->pre = e->pre;
-						if (!e->next->next) {
-							tail = e->next;
-							if (tail) {
-								tail->pre = e->pre;
-							}
-						}
-					}
-					else {
-						tail = e->pre;
-						if (tail) {
-							tail->pre = e->pre->pre;
-						}
-					}
-				}else if (e->type==EXECUTE_LAYER && e->s->integrating_batch < batch && e->t->working_batch < batch && e->t->integrating_batch!=batch-1) {
-					int ret = launch_job(&head, &tail, e, gen, streams[tasks]);
-					if ( ret != LAUNCH_INTEGRATE) {
+					batch++;
+					tasks = 0;
+				}
+			}
+
+			pick_layer(0)->state = LAYER_STATE_INTEGRATED;
+			layer_task_head->pre=new_executable(gen, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer);
+			layer_task_head->pre->next = layer_task_head;
+			layer_task_head = layer_task_head->pre;
+		}
+
+		executable* layer_task = layer_task_head;
+		while (layer_task && tasks < task_width) {
+			if (layer_task->gen == gen && tasks < task_width) {
+				if (layer_task->s->state == LAYER_STATE_INTEGRATING) {
+					layer_task->s->integrate_fn << <layer_task->s->size / thread_num + 1, layer_task->s->size>thread_num ? thread_num : layer_task->s->size, 0, streams[tasks] >> >(layer_task->s->dev_t, layer_task->s->offset);
+					append_executable(&inqueue_task_head, &inqueue_task_tail, layer_task);
+					layer_task->s->state = LAYER_STATE_INTEGRATE_ARRANGED;
 #ifdef DEBUG
-						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d FROM_WORKIN:%d TO_WORKING:%d\n", gen, batch, LAUNCH_TYPE_DBG_STR[ret], e->s->id, e->t->id, e->s->working_batch, e->t->working_batch);
+					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "INTE", layer_task->s->id, layer_task->t->id);
 #endif
-						e->t->working_batch = batch;
-						switch (e->t->type) {
-						case LAYER_LOGICAL:
-							e->t->phsical->working_batch = batch;
-							break;
-						case LAYER_PHSICAL:
-							layer_t* next = e->t->logical_head;
-							while (next) {
-								next->working_batch = batch;
-								next = next->next_logical;
+				}
+				else {
+					if (layer_task->s->state == LAYER_STATE_INTEGRATED && layer_task->l->state == LINK_STATE_MUTATED && layer_task->t->state != LAYER_STATE_INTEGRATE_ARRANGED && layer_task->t->state != LAYER_STATE_INTEGRATED) {
+						if (layer_task->t->state != LAYER_STATE_INTEGRATING) {
+							layer_task->s->clear_push_fn << <layer_task->t->size / thread_num + 1, layer_task->t->size>thread_num ? thread_num : layer_task->t->size, 0, streams[tasks] >> >(layer_task->s->dev_t, layer_task->t->dev_t, layer_task->t->offset, layer_task->l->dev_t, layer_task->s->size, gen);
+							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+							append_executable(&inqueue_task_head, &inqueue_task_tail, layer_task);
+							layer_task->t->state = LAYER_STATE_INTEGRATING;
+							link* next_link = layer_task->t->next;
+							while (next_link) {
+								executable* n = new_executable(gen + 1, EXECUTE_LAYER, layer_task->t, next_link, next_link->layer);
+								append_executable(&layer_task_head, &layer_task_tail, n);
+								next_link = next_link->another;
 							}
-							break;
-						}
-						if (e->pre) {
-							e->pre->next = e->next;
-							if (!e->pre->pre) {
-								head = e->pre;
-								if (head) {
-									head->next = e->next;
-								}
-							}
-						}
-						else {
-							head = e->next;
-							if (head) {
-								head->next = e->next->next;
-							}
-						}
-						if (e->next) {
-							e->next->pre = e->pre;
-							if (!e->next->next) {
-								tail = e->next;
-								if (tail) {
-									tail->pre = e->pre;
-								}
-							}
-						}
-						else {
-							tail = e->pre;
-							if (tail) {
-								tail->pre = e->pre->pre;
-							}
-						}
-						if (e->type == EXECUTE_LAYER && e->t->working_gen < gen) {
-							link* next = e->t->next;
-							while (next) {
-								executable* n = new_executable(gen + 1, EXECUTE_LAYER, e->t, next, next->layer);
-								if (!head) {
-									head = n;
-								}
-								if (tail) {
-									tail->next = n;
-									tail->next->pre = tail;
-									tail = tail->next;
-								}
-								else {
-									tail = n;
-								}
-								next = next->another;
-							}
-							e->t->working_gen = gen;
-							switch (e->t->type) {
-							case LAYER_LOGICAL: {
-								if (e->t->phsical->working_gen < gen) {
-									if (!e->t->delegate) {
-										link* next = e->t->phsical->next;
-										while (next) {
-											executable* n = new_executable(gen + 1, EXECUTE_LAYER, e->t->phsical, next, next->layer);
-											if (!head) {
-												head = n;
-											}
-											if (tail) {
-												tail->next = n;
-												tail->next->pre = tail;
-												tail = tail->next;
-											}
-											else {
-												tail = n;
-											}
-											next = next->another;
-										}
-									}
-									e->t->phsical->working_gen = gen;
-								}
-								if (e->t->delegate) {
-									layer_t* next = e->t->phsical->logical_head;
+							switch (layer_task->t->type) {
+							case LAYER_LOGICAL:
+								if (!layer_task->t->delegate) {
+									link* next = layer_task->t->phsical->next;
 									while (next) {
-										next->working_gen = gen;
-										next = next->next_logical;
+										executable* n = new_executable(gen + 1, EXECUTE_LAYER, layer_task->t->phsical, next, next->layer);
+										append_executable(&layer_task_head, &layer_task_tail, n);
+										next = next->another;
 									}
 								}
-							}
+								layer_task->t->phsical->state = LAYER_STATE_INTEGRATING;
 								break;
-							case LAYER_PHSICAL: {
-								layer_t* next = e->t->logical_head;
+							case LAYER_PHSICAL:
+								layer_t* next = layer_task->t->logical_head;
 								while (next) {
-									if (next->working_gen < gen) {
-										if (!next->delegate) {
-											link* next_link = next->next;
-											while (next_link) {
-												executable* n = new_executable(gen + 1, EXECUTE_LAYER, next, next_link, next_link->layer);
-												if (!head) {
-													head = n;
-												}
-												if (tail) {
-													tail->next = n;
-													tail->next->pre = tail;
-													tail = tail->next;
-												}
-												else {
-													tail = n;
-												}
-												next_link = next_link->another;
-											}
+									if (!next->delegate) {
+										link* next_link = next->next;
+										while (next_link) {
+											executable* n = new_executable(gen + 1, EXECUTE_LAYER, next, next_link, next_link->layer);
+											append_executable(&layer_task_head, &layer_task_tail, n);
+											next_link = next_link->another;
 										}
-										next->working_gen = gen;
 									}
+									next->state = LAYER_STATE_INTEGRATING;
 									next = next->next_logical;
 								}
-							}
 								break;
 							}
-						}
-						executable* f = e;
-						e = e->next;
-						free(f);
-						continue;
-					}
-					else {
-						e->s->integrating_batch = batch;
-						switch (e->s->type) {
-						case LAYER_LOGICAL:
-							e->s->phsical->integrating_batch = batch;
-							break;
-						case LAYER_PHSICAL:
-							layer_t* next = e->s->logical_head;
-							while (next) {
-								next->integrating_batch = batch;
-								next = next->next_logical;
-							}
-							break;
-						}
 #ifdef DEBUG
-						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, LAUNCH_TYPE_DBG_STR[ret], e->s->id, e->t->id);
+							fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "CLRP", layer_task->s->id, layer_task->t->id);
 #endif
+						}
+						else {
+							layer_task->s->push_fn << <layer_task->t->size / thread_num + 1, layer_task->t->size>thread_num ? thread_num : layer_task->t->size, 0, streams[tasks] >> > (layer_task->s->dev_t, layer_task->t->dev_t, layer_task->t->offset, layer_task->l->dev_t, layer_task->s->size, gen);
+							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+							append_executable(&inqueue_task_head, &inqueue_task_tail, layer_task);
+#ifdef DEBUG
+							fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "PUSH", layer_task->s->id, layer_task->t->id);
+#endif
+						}
+						executable* n = new_executable(gen + 1, EXECUTE_LINK, layer_task->s, layer_task->l, layer_task->l->layer);
+						append_executable(&link_task_head, &link_task_tail, n);
 					}
-					tasks++;
 				}
+				tasks++;
 			}
 			else {
 				break;
 			}
-			e = e->next;
+			layer_task = layer_task->next;
 		}
 		for (int i = 0; i < tasks; i++) {
 			cudaStreamSynchronize(streams[i]);
 		}
+		executable* inqueue_task = inqueue_task_head;
+		while (inqueue_task) {
+			executable* next_inqueue_task = inqueue_task->next;
+			switch (inqueue_task->type) {
+			case EXECUTE_LINK:
+				inqueue_task->l->state = LINK_STATE_MUTATED;
+				remove_executable(&inqueue_task_head, &inqueue_task_tail, inqueue_task);
+				free(inqueue_task);
+				break;
+			case EXECUTE_LAYER:
+				layer_state update;
+				layer_t* s = inqueue_task->s;
+				switch (s->state) {
+				case LAYER_STATE_INTEGRATE_ARRANGED:
+					update = LAYER_STATE_INTEGRATED;
+					remove_executable(&inqueue_task_head, &inqueue_task_tail, inqueue_task);
+					break;
+				case LAYER_STATE_INTEGRATED:
+					update = LAYER_STATE_EMITED;
+					remove_executable(&inqueue_task_head, &inqueue_task_tail, inqueue_task);
+					free(inqueue_task);
+					break;
+				}
+				switch (s->type) {
+				case LAYER_LOGICAL:
+					s->phsical->state = update;
+					break;
+				case LAYER_PHSICAL:
+					layer_t* next = s->logical_head;
+					while (next) {
+						next->state = update;
+						next = next->next_logical;
+					}
+					break;
+				}
+				s->state = update;
+				break;
+			}
+			inqueue_task = next_inqueue_task;
+		}
 		//critical region end
-	}
-	for (int i = 0; i<5; i++)
-	{
-		cudaStreamDestroy(streams[i]);
 	}
 }
 
 void emmit_layer(layer_t* l, float* t) {
 	cudaMemcpy(l->dev_t, t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
+	l->state = LAYER_STATE_INTEGRATED;
 }
 
 int main(int argc, char* argv[])
@@ -716,7 +643,7 @@ int main(int argc, char* argv[])
 	has_t(NULL, 30, NULL, 3);
 
 	float input = 1.0;
-	emmit_layer(pick_layer(1), &input);
+	emmit_layer(pick_layer(0), &input);
 
 	execute(new_executable(1, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer),200);
 
