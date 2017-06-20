@@ -18,81 +18,21 @@ TODO: 增加不更新权重连接支持（mute_fn为NULL）
 #include <Windows.h>
 #include <memory.h>
 
+#include "../../Ludwig/Ludwig/ludwig.h"
+#pragma comment(lib, "../../Ludwig/x64/Debug/Ludwig.lib")
+
 #define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
 #define DEBUG
-
-enum layer_type {
-	LAYER_PHSICAL,
-	LAYER_LOGICAL
-};
 
 enum execute_type {
 	EXECUTE_LAYER,
 	EXECUTE_LINK
 };
 
-struct gen_t {
-	unsigned long long gen;
-	float t;
-};
-
-struct gen_w {
-	unsigned long long gen;
-	unsigned long long working_gen;
-	int stage;
-	float t;
-};
-
-struct link;
-
 typedef void(*fp_integrate)(gen_t*, int);
 typedef void(*fp_mute)(gen_w*, const unsigned long long);
 typedef void(*fp_clear_push)(const gen_t *, gen_t *, int, gen_w*, const int, const unsigned long long);
 typedef void(*fp_push)(const gen_t*, gen_t*, int, gen_w*, const int, const unsigned long long);
-
-struct layer_t {
-	int id;
-	layer_type type;
-	int size;
-	link* pre;
-	link* next;
-	layer_t* follow;
-	fp_integrate integrate_fn;
-	fp_clear_push clear_push_fn;
-	fp_push push_fn;
-
-	//phsical
-	unsigned long long gen;
-	unsigned long long working_gen;
-	unsigned long long integrated_gen;
-	unsigned long long swap_gen;
-	unsigned long long working_batch;
-	unsigned long long integrating_batch;
-	gen_t *t;
-	int cur_s_dev_t;
-	int cur_t_dev_t;
-	gen_t *dev_t[2];
-	const float* dev_atte;
-	layer_t* logical_head;
-	layer_t* logical_tail;
-
-	//logical
-	int offset;
-	bool delegate;
-	layer_t* phsical;
-	layer_t* next_logical;
-};
-
-struct link {
-	unsigned long long gen;
-	unsigned long long mutated_gen;
-	unsigned long long mutating_batch;
-	layer_t* layer;
-	int size;
-	gen_w* t;
-	gen_w *dev_t;
-	link* another;
-};
 
 struct executable {
 	unsigned long long gen;
@@ -162,156 +102,23 @@ __global__ void default_push(const gen_t *s, gen_t *t, int to, gen_w* w, const i
 	}
 }
 
-layer_t* pick_layer(int idx) {
-	if (!layer_list) {
-		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", idx);
-	}
-	else {
-		if (layer_list->id == idx) {
-			return layer_list;
+void default_init_device() {
+	layer_t* next = pick_layer(0);
+	while (next) {
+		int size = next->size;
+		next->integrate_fn = default_integrate;
+		next->clear_push_fn = default_clear_push;
+		next->push_fn = default_push;
+		if (size > 0) {
+			next->t = (gen_t*)malloc(sizeof(gen_t)*size);
+			//TODO: initialize gen_t?
+			cudaMalloc((void**)&next->dev_t[0], size * sizeof(gen_t));
+			cudaMemcpy(next->dev_t[0], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
+			cudaMalloc((void**)&next->dev_t[1], size * sizeof(gen_t));
+			cudaMemcpy(next->dev_t[1], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
 		}
-		else {
-			layer_t* iter = layer_list;
-			while (iter->follow) {
-				if (iter->follow->id == idx) {
-					return iter->follow;
-				}
-				iter = iter->follow;
-			}
-		}
+		next = next->follow;
 	}
-	ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", idx);
-}
-
-layer_t* new_layer_phsical(int id, int size,float atte=0.0, fp_integrate inte_fn=default_integrate, fp_clear_push cl_p_fn=default_clear_push, fp_push p_fn=default_push) {
-	layer_t* ret = (layer_t*)malloc(sizeof(layer_t));
-	memset(ret, 0, sizeof(layer_t));
-	ret->id = id;
-	ret->type = LAYER_PHSICAL;
-	ret->size = size;
-	ret->working_gen = 0;
-	ret->integrated_gen = 0;
-	ret->swap_gen = 0;
-	ret->working_batch = 0;
-	ret->integrating_batch = 0;
-	ret->offset = 0;
-	ret->integrate_fn = inte_fn;
-	ret->clear_push_fn = cl_p_fn;
-	ret->push_fn = p_fn;
-	ret->cur_s_dev_t = 0;
-	ret->cur_t_dev_t = 1;
-	ret->phsical = ret;
-
-	if (atte > 0.0) {
-		cudaMemcpyToSymbol(ret->dev_atte, &atte, sizeof(int));
-	}
-	if (size > 0) {
-		ret->t = (gen_t*)malloc(sizeof(gen_t)*size);
-		//TODO: initialize gen_t?
-		cudaMalloc((void**)&ret->dev_t[0], size * sizeof(gen_t));
-		cudaMemcpy(ret->dev_t[0], ret->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
-		cudaMalloc((void**)&ret->dev_t[1], size * sizeof(gen_t));
-		cudaMemcpy(ret->dev_t[1], ret->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
-	}
-	if (!layer_list) {
-		layer_list = ret;
-	}
-	else {
-		layer_t* iter = layer_list;
-		while (iter->follow) {
-			iter = iter->follow;
-		}
-		iter->follow = ret;
-	}
-	return ret;
-}
-
-layer_t* new_layer_logical(int id, int phsical, int offset, int size, bool delegate) {
-	layer_t* ret = (layer_t*)malloc(sizeof(layer_t));
-	memset(ret, 0, sizeof(layer_t));
-	ret->id = id;
-	ret->type = LAYER_LOGICAL;
-	ret->size = size;
-	ret->delegate = delegate;
-
-	layer_t* pl= pick_layer(phsical);
-	ret->phsical = pl;
-	ret->offset = offset;
-	ret->integrate_fn = pl->integrate_fn;
-	ret->clear_push_fn = pl->clear_push_fn;
-	ret->push_fn = pl->push_fn;
-
-	if (!pl->logical_head) {
-		pl->logical_head = ret;
-	}
-	if (pl->logical_tail) {
-		pl->logical_tail->next_logical = ret;
-		pl->logical_tail = pl->logical_tail->next_logical;
-	}
-	else {
-		pl->logical_tail = ret;
-	}
-
-	if (!layer_list) {
-		layer_list = ret;
-	}
-	else {
-		layer_t* iter = layer_list;
-		while (iter->follow) {
-			iter = iter->follow;
-		}
-		iter->follow = ret;
-	}
-	return ret;
-}
-
-link* new_link(layer_t* layer, int size) {
-	link* ret = (link*)malloc(sizeof(link));
-	memset(ret, 0, sizeof(link));
-	ret->mutated_gen = 0;
-	ret->mutating_batch = 0;
-	ret->layer = layer;
-	ret->size = size;
-	ret->t = (gen_w*)malloc(sizeof(gen_w)*size);
-	//TODO: initialize gen_t
-	cudaMalloc((void**)&ret->dev_t, size * sizeof(gen_w));
-	cudaMemcpy(ret->dev_t, ret->t, size * sizeof(gen_w), cudaMemcpyHostToDevice);
-	return ret;
-}
-
-void add_link(link** head, link* next) {
-	if(!*head) {
-		*head = next;
-		return;
-	}
-	else {
-		link* tail = *head;
-		while (tail->another) {
-			tail = tail->another;
-		}
-		tail->another = next;
-	}
-}
-
-layer_t* has_t(layer_t* s, int or_another_s, layer_t* next, int or_another_next) {
-	if (!s) {
-		s = pick_layer(or_another_s);
-	}
-	if (!s) {
-		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_s);
-	}
-
-	if (!next) {
-		next = pick_layer(or_another_next);
-	}
-	if (!next) {
-		ERROR("COMPILE ERROR: LAYER[%d] NOT EXSISTS!\n", or_another_next);
-	}
-	int size = s->size*next->size;
-	link* l = new_link(next, size);
-	add_link(&s->next, l);
-	//add_link(&next->pre, l);
-	return next;
 }
 
 executable* new_executable(int gen, execute_type type, layer_t* s, link* l, layer_t* t) {
@@ -494,7 +301,7 @@ void execute(executable* head, int max_gen) {
 				}
 				if (s_logical->integrated_gen != gen) {
 					if (s_phisical->integrated_gen != gen) {
-						layer_task->s->integrate_fn << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
+						((fp_integrate)layer_task->s->integrate_fn) << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
 						tasks++;
 						s_phisical->integrated_gen = gen;
 					}
@@ -507,7 +314,7 @@ void execute(executable* head, int max_gen) {
 				else if(s_logical->integrating_batch != batch){
 					if (layer_task->l->mutating_batch != batch) {
 						if (t_logical->working_gen != gen) {
-							layer_task->s->clear_push_fn << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical ->offset, layer_task->l->dev_t, s_logical->size, gen);
+							((fp_clear_push)layer_task->s->clear_push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical ->offset, layer_task->l->dev_t, s_logical->size, gen);
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
 							link* next_link = t_logical->next;
@@ -551,7 +358,7 @@ void execute(executable* head, int max_gen) {
 #endif
 						}
 						else if (t_logical->working_batch != batch){
-							layer_task->s->push_fn << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+							((fp_push)layer_task->s->push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
 							t_logical->working_batch = batch;
@@ -649,21 +456,16 @@ int main(int argc, char* argv[])
 	has_t(NULL, 13, NULL, 23);
 
 	has_t(NULL, 21, NULL, 31);
-	//has_t(NULL, 210, NULL, 31);
 	has_t(NULL, 22, NULL, 32);
-	//has_t(NULL, 220, NULL, 32);
 	has_t(NULL, 23, NULL, 33);
-	//has_t(NULL, 230, NULL, 33);
 
 	has_t(NULL, 21, NULL, 210);
-	//has_t(NULL, 210, NULL, 21);
 	has_t(NULL, 22, NULL, 220);
-	//has_t(NULL, 220, NULL, 22);
 	has_t(NULL, 23, NULL, 230);
-	//has_t(NULL, 230, NULL, 23);
 
 	has_t(NULL, 3, NULL, 30);
-	//has_t(NULL, 30, NULL, 3);
+
+	default_init_device();
 
 	float input = 1.0;
 	emit_layer(pick_layer(0), &input);
