@@ -18,11 +18,14 @@ TODO: 增加不更新权重连接支持（mute_fn为NULL）
 #include <Windows.h>
 #include <memory.h>
 
-#include "../../Ludwig/Ludwig/ludwig.h"
+#include "../../Ludwig/Ludwig/ludwig_neural_network.h"
+#include "../../Ludwig/Ludwig/ludwig_net.h"
 #pragma comment(lib, "../../Ludwig/x64/Debug/Ludwig.lib")
 
+#include "net.h"
+
 #define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
-#define DEBUG
+//#define DEBUG
 
 enum execute_type {
 	EXECUTE_LAYER,
@@ -466,6 +469,10 @@ int main(int argc, char* argv[])
 	has_t(NULL, 3, NULL, 30);
 
 	default_init_device();
+
+	friedrich_acts(net_events::EVENT_TEST, acts_test);
+
+	friedrich_talking(9999);
 
 	float input = 1.0;
 	emit_layer(pick_layer(0), &input);
