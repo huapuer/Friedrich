@@ -25,7 +25,7 @@ TODO: 增加不更新权重连接支持（mute_fn为NULL）
 #include "net.h"
 
 #define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
-//#define DEBUG
+#define DEBUG
 
 enum execute_type {
 	EXECUTE_LAYER,
@@ -45,6 +45,7 @@ struct executable {
 	layer_t* t;
 	executable* pre;
 	executable* next;
+	bool done;
 };
 
 struct map {
@@ -132,6 +133,7 @@ executable* new_executable(int gen, execute_type type, layer_t* s, link* l, laye
 	ret->s = s;
 	ret->l = l;
 	ret->t = t;
+	ret->done = false;
 	return ret;
 }
 
@@ -272,7 +274,9 @@ void execute(executable* head, int max_gen) {
 					wrap_layers(link_task, &s_phisical, &t_phisical, &s_logical, &t_logical);
 					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "MUTW", s_logical->id, t_logical->id);
 #endif
+					executable* tmp = link_task;
 					link_task = link_task->next;
+					free(tmp);
 				}
 				if (tasks == task_width) {
 					for (int i = 0; i < tasks; i++) {
@@ -320,6 +324,7 @@ void execute(executable* head, int max_gen) {
 							((fp_clear_push)layer_task->s->clear_push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical ->offset, layer_task->l->dev_t, s_logical->size, gen);
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+							layer_task->done = true;
 							link* next_link = t_logical->next;
 							while (next_link) {
 								executable* n = new_executable(gen + 1, EXECUTE_LAYER, t_logical, next_link, next_link->layer);
@@ -364,6 +369,7 @@ void execute(executable* head, int max_gen) {
 							((fp_push)layer_task->s->push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+							layer_task->done = true;
 							t_logical->working_batch = batch;
 #ifdef DEBUG
 							fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "PUSH", s_logical->id, t_logical->id, t_phisical->cur_t_dev_t);
@@ -380,7 +386,11 @@ void execute(executable* head, int max_gen) {
 			else {
 				break;
 			}
+			executable* tmp = layer_task;
 			layer_task = layer_task->next;
+			if (tmp->done == true) {
+				free(tmp);
+			}
 		}
 		for (int i = 0; i < tasks; i++) {
 			cudaStreamSynchronize(streams[i]);
