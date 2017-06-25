@@ -83,33 +83,10 @@ __global__ void default_mute(gen_w* w, const unsigned long long gen) {
 	}
 }
 
-__global__ void default_clear_push_forward(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void default_clear_push_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ts, const unsigned long long gen)
 {
-	int i = threadIdx.x + offset;
-	for (int j = 0; j < ss; j++) {
-		t[i].t = 0.0;
-		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[j].t;
-			w[j].working_gen = gen;
-		}
-	}
-}
-
-__global__ void default_push_forward(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
-{
-	int i = threadIdx.x + offset;
-	for (int j = 0; j < ss; j++) {
-		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[j].t;
-			w[j].working_gen = gen;
-		}
-	}
-}
-
-__global__ void default_clear_push_full(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
-{
-	int i = threadIdx.x + offset;
-	for (int j = 0; j < ss; j++) {
+	int j = threadIdx.x + soffset;
+	for (int i = toffset; i < ts; i++) {
 		t[i].t = 0.0;
 		if (s[j].t > 0.0) {
 			t[i].t += s[j].t * w[i*j + j].t;
@@ -118,22 +95,67 @@ __global__ void default_clear_push_full(const gen_t *s, gen_t *t, int offset, ge
 	}
 }
 
-__global__ void default_push_full(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void default_push_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ts, const unsigned long long gen)
 {
-	int i = threadIdx.x + offset;
-	for (int j = 0; j < ss; j++) {
+	int j = threadIdx.x + soffset;
+	for (int i = toffset; i < ts; i++) {
 		if (s[j].t > 0.0) {
 			t[i].t += s[j].t * w[i*j + j].t;
 			w[i*j + j].working_gen = gen;
 		}
 	}
 }
+
+__global__ void default_clear_pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+{
+	int i = threadIdx.x + toffset;
+	int j = soffset;
+	t[i].t = 0.0;
+	if (s[j].t > 0.0) {
+		t[i].t += s[j].t * w[j].t;
+		w[j].working_gen = gen;
+	}
+}
+
+__global__ void default_pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+{
+	int i = threadIdx.x + toffset;
+	int j = soffset;
+	t[i].t = 0.0;
+	if (s[j].t > 0.0) {
+		t[i].t += s[j].t * w[j].t;
+		w[j].working_gen = gen;
+	}
+}
+
+__global__ void default_clear_pull_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+{
+	int i = threadIdx.x + toffset;
+	for (int j = soffset; j < ss; j++) {
+		t[i].t = 0.0;
+		if (s[j].t > 0.0) {
+			t[i].t += s[j].t * w[i*j + j].t;
+			w[i*j + j].working_gen = gen;
+		}
+	}
+}
+
+__global__ void default_pull_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+{
+	int i = threadIdx.x + toffset;
+	for (int j = soffset; j < ss; j++) {
+		if (s[j].t > 0.0) {
+			t[i].t += s[j].t * w[i*j + j].t;
+			w[i*j + j].working_gen = gen;
+		}
+	}
+}
+
 
 void default_init_device() {
 	layer_t* next = pick_layer(0);
 	while (next) {
 		int size = next->size;
-		next->integrate_fn = default_integrate;
 		if (size > 0) {
 			next->t = (gen_t*)malloc(sizeof(gen_t)*size);
 			//TODO: initialize gen_t?
@@ -143,22 +165,6 @@ void default_init_device() {
 			cudaMemcpy(next->dev_t[1], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
 		}
 		next = next->follow;
-	}
-
-	link* next_l = pick_link(0);
-	while (next_l) {
-		switch(next_l->type) {
-		case LINK_FORWARD:
-			next_l->clear_push_fn = default_clear_push_forward;
-			next_l->push_fn = default_push_forward;
-			break;
-		case LINK_FULL:
-			next_l->clear_push_fn = default_clear_push_full;
-			next_l->push_fn = default_push_full;
-			break;
-		}
-
-		next_l = next_l->follow;
 	}
 }
 
@@ -173,8 +179,6 @@ executable* new_executable(int gen, execute_type type, layer_t* s, link* l, laye
 	ret->done = false;
 	return ret;
 }
-
-fp_mute mute_fn;
 
 void append_executable(executable** head, executable** tail, executable* n) {
 	if (!*head) {
@@ -301,7 +305,7 @@ void execute(executable* head, int max_gen) {
 			executable* link_task = link_task_head;
 			while (link_task) {			
 				while (link_task && tasks < task_width) {
-					mute_fn << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t, gen);
+					default_mute << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t, gen);
 					remove_executable(&link_task_head, &link_task_tail, link_task);
 					tasks++;
 					link_task->l->mutating_batch = batch;
@@ -344,7 +348,7 @@ void execute(executable* head, int max_gen) {
 				}
 				if (s_logical->integrated_gen != gen) {
 					if (s_phisical->integrated_gen != gen) {
-						((fp_integrate)layer_task->s->integrate_fn) << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
+						default_integrate << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
 						tasks++;
 						s_phisical->integrated_gen = gen;
 					}
@@ -357,7 +361,18 @@ void execute(executable* head, int max_gen) {
 				else if(s_logical->integrating_batch != batch){
 					if (layer_task->l->mutating_batch != batch) {
 						if (t_logical->working_gen != gen) {
-							((fp_clear_push)layer_task->l->clear_push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical ->offset, layer_task->l->dev_t, s_logical->size, gen);
+							switch (layer_task->l->type) {
+							case LINK_FORWARD:
+								default_clear_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+								break;
+							case LINK_FULL:
+								if (s_logical->size <= t_logical->size) {
+									default_clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+								}
+								else {
+									default_clear_push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, t_logical->size, gen);
+								}
+							}
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
 							layer_task->done = true;
@@ -402,7 +417,18 @@ void execute(executable* head, int max_gen) {
 #endif
 						}
 						else if (t_logical->working_batch != batch){
-							((fp_push)layer_task->l->push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+							switch (layer_task->l->type) {
+							case LINK_FORWARD:
+								default_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+								break;
+							case LINK_FULL:
+								if (s_logical->size <= t_logical->size) {
+									default_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+								}
+								else {
+									default_push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, t_logical->size, gen);
+								}
+							}
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
 							layer_task->done = true;
@@ -475,8 +501,6 @@ int main(int argc, char* argv[])
 	w_mutes.size = 10;
 	float host_t[10] = { 1.0 };
 	cudaMemcpyToSymbol(w_mutes.dev_t, &host_t, w_mutes.size * sizeof(gen_w));
-
-	mute_fn = default_mute;
 
 	has_layer_phsical(0, 9);
 
