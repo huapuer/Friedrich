@@ -83,9 +83,32 @@ __global__ void default_mute(gen_w* w, const unsigned long long gen) {
 	}
 }
 
-__global__ void default_clear_push(const gen_t *s, gen_t *t, int to, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void default_clear_push_forward(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
 {
-	int i = threadIdx.x + to;
+	int i = threadIdx.x + offset;
+	for (int j = 0; j < ss; j++) {
+		t[i].t = 0.0;
+		if (s[j].t > 0.0) {
+			t[i].t += s[j].t * w[j].t;
+			w[j].working_gen = gen;
+		}
+	}
+}
+
+__global__ void default_push_forward(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
+{
+	int i = threadIdx.x + offset;
+	for (int j = 0; j < ss; j++) {
+		if (s[j].t > 0.0) {
+			t[i].t += s[j].t * w[j].t;
+			w[j].working_gen = gen;
+		}
+	}
+}
+
+__global__ void default_clear_push_full(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
+{
+	int i = threadIdx.x + offset;
 	for (int j = 0; j < ss; j++) {
 		t[i].t = 0.0;
 		if (s[j].t > 0.0) {
@@ -95,9 +118,9 @@ __global__ void default_clear_push(const gen_t *s, gen_t *t, int to, gen_w* w, c
 	}
 }
 
-__global__ void default_push(const gen_t *s, gen_t *t, int to, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void default_push_full(const gen_t *s, gen_t *t, int offset, gen_w* w, const int ss, const unsigned long long gen)
 {
-	int i = threadIdx.x + to;
+	int i = threadIdx.x + offset;
 	for (int j = 0; j < ss; j++) {
 		if (s[j].t > 0.0) {
 			t[i].t += s[j].t * w[i*j + j].t;
@@ -111,8 +134,6 @@ void default_init_device() {
 	while (next) {
 		int size = next->size;
 		next->integrate_fn = default_integrate;
-		next->clear_push_fn = default_clear_push;
-		next->push_fn = default_push;
 		if (size > 0) {
 			next->t = (gen_t*)malloc(sizeof(gen_t)*size);
 			//TODO: initialize gen_t?
@@ -122,6 +143,22 @@ void default_init_device() {
 			cudaMemcpy(next->dev_t[1], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
 		}
 		next = next->follow;
+	}
+
+	link* next_l = pick_link(0);
+	while (next_l) {
+		switch(next_l->type) {
+		case LINK_FORWARD:
+			next_l->clear_push_fn = default_clear_push_forward;
+			next_l->push_fn = default_push_forward;
+			break;
+		case LINK_FULL:
+			next_l->clear_push_fn = default_clear_push_full;
+			next_l->push_fn = default_push_full;
+			break;
+		}
+
+		next_l = next_l->follow;
 	}
 }
 
@@ -228,7 +265,6 @@ void wrap_layers(executable* task, layer_t** s_phisical, layer_t** t_phisical, l
 		}
 		break;
 	}
-
 }
 
 void execute(executable* head, int max_gen) {
@@ -321,7 +357,7 @@ void execute(executable* head, int max_gen) {
 				else if(s_logical->integrating_batch != batch){
 					if (layer_task->l->mutating_batch != batch) {
 						if (t_logical->working_gen != gen) {
-							((fp_clear_push)layer_task->s->clear_push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical ->offset, layer_task->l->dev_t, s_logical->size, gen);
+							((fp_clear_push)layer_task->l->clear_push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical ->offset, layer_task->l->dev_t, s_logical->size, gen);
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
 							layer_task->done = true;
@@ -366,7 +402,7 @@ void execute(executable* head, int max_gen) {
 #endif
 						}
 						else if (t_logical->working_batch != batch){
-							((fp_push)layer_task->s->push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+							((fp_push)layer_task->l->push_fn) << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
 							tasks++;
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
 							layer_task->done = true;
@@ -442,41 +478,41 @@ int main(int argc, char* argv[])
 
 	mute_fn = default_mute;
 
-	new_layer_phsical(0, 9);
+	has_layer_phsical(0, 9);
 
-	new_layer_phsical(1, 9);
-	new_layer_logical(11, 1, 0, 3, false);
-	new_layer_logical(12, 1, 3, 3, false);
-	new_layer_logical(13, 1, 6, 3, false);
+	has_layer_phsical(1, 9);
+	has_layer_logical(11, 1, 0, 3, false);
+	has_layer_logical(12, 1, 3, 3, false);
+	has_layer_logical(13, 1, 6, 3, false);
 
-	new_layer_phsical(21, 3);
-	new_layer_logical(210, 21, 0, 3, true);
-	new_layer_phsical(22, 3);
-	new_layer_logical(220, 22, 0, 3, true);
-	new_layer_phsical(23, 3);
-	new_layer_logical(230, 23, 0, 3, true);
+	has_layer_phsical(21, 3);
+	has_layer_logical(210, 21, 0, 3, true);
+	has_layer_phsical(22, 3);
+	has_layer_logical(220, 22, 0, 3, true);
+	has_layer_phsical(23, 3);
+	has_layer_logical(230, 23, 0, 3, true);
 
-	new_layer_phsical(3, 3);
-	new_layer_logical(30, 3, 0, 3, true);
-	new_layer_logical(31, 3, 0, 1, false);
-	new_layer_logical(32, 3, 3, 1, false);
-	new_layer_logical(33, 3, 6, 1, false);
+	has_layer_phsical(3, 3);
+	has_layer_logical(30, 3, 0, 3, true);
+	has_layer_logical(31, 3, 0, 1, false);
+	has_layer_logical(32, 3, 3, 1, false);
+	has_layer_logical(33, 3, 6, 1, false);
 
-	has_t(NULL, 0, NULL, 1);
+	has_link(0, LINK_FORWARD, NULL, 0, NULL, 1);
 
-	has_t(NULL, 11, NULL, 21);
-	has_t(NULL, 12, NULL, 22);
-	has_t(NULL, 13, NULL, 23);
+	has_link(1, LINK_FORWARD, NULL, 11, NULL, 21);
+	has_link(2, LINK_FORWARD, NULL, 12, NULL, 22);
+	has_link(3, LINK_FORWARD, NULL, 13, NULL, 23);
 
-	has_t(NULL, 21, NULL, 31);
-	has_t(NULL, 22, NULL, 32);
-	has_t(NULL, 23, NULL, 33);
+	has_link(4, LINK_FULL, NULL, 21, NULL, 31);
+	has_link(5, LINK_FULL, NULL, 22, NULL, 32);
+	has_link(6, LINK_FULL, NULL, 23, NULL, 33);
 
-	has_t(NULL, 21, NULL, 210);
-	has_t(NULL, 22, NULL, 220);
-	has_t(NULL, 23, NULL, 230);
+	has_link(7, LINK_FULL, NULL, 21, NULL, 210);
+	has_link(8, LINK_FULL, NULL, 22, NULL, 220);
+	has_link(9, LINK_FULL, NULL, 23, NULL, 230);
 
-	has_t(NULL, 3, NULL, 30);
+	has_link(10, LINK_FULL, NULL, 3, NULL, 30);
 
 	default_init_device();
 
