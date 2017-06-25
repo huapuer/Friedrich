@@ -89,8 +89,8 @@ __global__ void default_clear_push_full(const gen_t *s, gen_t *t, int soffset, i
 	for (int i = toffset; i < ts; i++) {
 		t[i].t = 0.0;
 		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[i*j + j].t;
-			w[i*j + j].working_gen = gen;
+			t[i].t += s[j].t * w[i*j + i].t;
+			w[i*j + i].working_gen = gen;
 		}
 	}
 }
@@ -100,8 +100,8 @@ __global__ void default_push_full(const gen_t *s, gen_t *t, int soffset, int tof
 	int j = threadIdx.x + soffset;
 	for (int i = toffset; i < ts; i++) {
 		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[i*j + j].t;
-			w[i*j + j].working_gen = gen;
+			t[i].t += s[j].t * w[i*j + i].t;
+			w[i*j + i].working_gen = gen;
 		}
 	}
 }
