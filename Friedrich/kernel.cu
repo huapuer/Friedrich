@@ -17,6 +17,8 @@ TODO: 增加不更新权重连接支持（mute_fn为NULL）
 #include "mpi.h" 
 #include <Windows.h>
 #include <memory.h>
+#include <time.h>
+#include <stdlib.h>
 
 #include "../../Ludwig/Ludwig/ludwig_neural_network.h"
 #include "../../Ludwig/Ludwig/ludwig_net.h"
@@ -25,7 +27,8 @@ TODO: 增加不更新权重连接支持（mute_fn为NULL）
 #include "net.h"
 
 #define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
-#define DEBUG
+#define DEBUG_SCHEDULE
+#define DEBUG_DATA
 
 enum execute_type {
 	EXECUTE_LAYER,
@@ -59,14 +62,15 @@ layer_t* layer_list = 0;
 
 __global__ void default_integrate(gen_t* s, int offset) {
 	int i = threadIdx.x + offset;
-	if (s[i].t > 3.0) {
+	if (s[i].t > 0.0) {
 		s[i].t = 1.0;
 	}else {
-		s[i].t = 0.0;
+		s[i].t = -1.0;
 	}
 }
 
 __global__ void default_mute(gen_w* w, const unsigned long long gen) {
+	/*
 	int i = threadIdx.x;
 	if (w[i].working_gen == gen) {
 		int gap = gen - w[i].gen;
@@ -81,6 +85,7 @@ __global__ void default_mute(gen_w* w, const unsigned long long gen) {
 		}
 		w[i].gen = gen;
 	}
+	*/
 }
 
 __global__ void default_clear_push_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ts, const unsigned long long gen)
@@ -151,8 +156,9 @@ __global__ void default_pull_full(const gen_t *s, gen_t *t, int soffset, int tof
 	}
 }
 
-
 void default_init_device() {
+	srand(time(NULL));
+
 	layer_t* next = pick_layer(0);
 	while (next) {
 		int size = next->size;
@@ -165,6 +171,25 @@ void default_init_device() {
 			cudaMemcpy(next->dev_t[1], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
 		}
 		next = next->follow;
+	}
+
+	link* next_l = pick_link(0);
+	while (next_l) {
+		int size = next_l->size;
+
+		next_l->t = (gen_w*)malloc(sizeof(gen_w)*size);
+		for (int i = 0; i < size; i++) {
+			if (next_l->id > 0) {
+				next_l->t[i].t = float(rand()) / float(RAND_MAX);
+			}
+			else {
+				next_l->t[i].t = 1.0f;
+			}
+		}
+		cudaMalloc((void**)&next_l->dev_t, size * sizeof(gen_w));
+		cudaMemcpy(next_l->dev_t, next_l->t, size * sizeof(gen_w), cudaMemcpyHostToDevice);
+		
+		next_l = next_l->follow;
 	}
 }
 
@@ -223,6 +248,53 @@ void remove_executable(executable** head, executable** tail, executable* e) {
 		*tail = e->pre;
 		if (*tail) {
 			(*tail)->pre = e->pre->pre;
+		}
+	}
+}
+
+void append_updated_layer(layer_t** head, layer_t** tail, layer_t* n) {
+	if (!*head) {
+		*head = n;
+	}
+	if (*tail) {
+		(*tail)->updated_next = n;
+		(*tail)->updated_next->updated_pre = *tail;
+		(*tail) = (*tail)->updated_next;
+	}
+	else {
+		*tail = n;
+	}
+}
+
+void remove_updated_layer(layer_t** head, layer_t** tail, layer_t* e) {
+	if (e->updated_pre) {
+		e->updated_pre->updated_next = e->updated_next;
+		if (!e->updated_pre->updated_pre) {
+			*head = e->updated_pre;
+			if (*head) {
+				(*head)->updated_next = e->updated_next;
+			}
+		}
+	}
+	else {
+		*head = e->updated_next;
+		if (*head) {
+			(*head)->updated_next = e->updated_next->updated_next;
+		}
+	}
+	if (e->updated_next) {
+		e->updated_next->updated_pre = e->updated_pre;
+		if (!e->updated_next->updated_next) {
+			*tail = e->updated_next;
+			if (*tail) {
+				(*tail)->updated_pre = e->updated_pre;
+			}
+		}
+	}
+	else {
+		*tail = e->updated_pre;
+		if (*tail) {
+			(*tail)->updated_pre = e->updated_pre->updated_pre;
 		}
 	}
 }
@@ -286,6 +358,8 @@ void execute(executable* head, int max_gen) {
 	executable* link_task_tail = NULL;
 	executable* layer_task_head = head;
 	executable* layer_task_tail = head;
+	layer_t* updated_layer_head = NULL;
+	layer_t* updated_layer_tail = NULL;
 
 	while (layer_task_head) {
 		//critical region begin
@@ -295,7 +369,7 @@ void execute(executable* head, int max_gen) {
 		tasks = 0;
 
 		if (layer_task_head->gen > gen) {
-#ifdef DEBUG
+#ifdef DEBUG_SCHEDULE
 			if (gen >= max_gen) {
 				break;
 			}
@@ -307,9 +381,10 @@ void execute(executable* head, int max_gen) {
 				while (link_task && tasks < task_width) {
 					default_mute << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t, gen);
 					remove_executable(&link_task_head, &link_task_tail, link_task);
+					link_task->done = true;
 					tasks++;
 					link_task->l->mutating_batch = batch;
-#ifdef DEBUG
+#ifdef DEBUG_SCHEDULE
 					layer_t *s_phisical, *t_phisical, *s_logical, *t_logical;
 					wrap_layers(link_task, &s_phisical, &t_phisical, &s_logical, &t_logical);
 					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "MUTW", s_logical->id, t_logical->id);
@@ -327,10 +402,12 @@ void execute(executable* head, int max_gen) {
 				}
 			}
 
+			/*
 			pick_layer(0)->integrated_gen = gen;
 			layer_task_head->pre=new_executable(gen, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer);
 			layer_task_head->pre->next = layer_task_head;
 			layer_task_head = layer_task_head->pre;
+			*/
 		}
 
 		executable* layer_task = layer_task_head;
@@ -349,12 +426,15 @@ void execute(executable* head, int max_gen) {
 				if (s_logical->integrated_gen != gen) {
 					if (s_phisical->integrated_gen != gen) {
 						default_integrate << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
+						layer_task->done = false;
 						tasks++;
 						s_phisical->integrated_gen = gen;
+
+						append_updated_layer(&updated_layer_head, &updated_layer_tail, s_phisical);
 					}
 					s_logical->integrated_gen = gen;
 					s_logical->integrating_batch = batch;
-#ifdef DEBUG
+#ifdef DEBUG_SCHEDULE
 					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "INTE", s_logical->id, t_logical->id, s_phisical->cur_s_dev_t);
 #endif
 				}
@@ -412,7 +492,7 @@ void execute(executable* head, int max_gen) {
 							t_logical->working_batch = batch;
 							t_phisical->working_gen = gen;
 							t_phisical->working_batch = batch;
-#ifdef DEBUG
+#ifdef DEBUG_SCHEDULE
 							fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "CLRP", s_logical->id, t_logical->id, t_phisical->cur_t_dev_t);
 #endif
 						}
@@ -433,7 +513,7 @@ void execute(executable* head, int max_gen) {
 							remove_executable(&layer_task_head, &layer_task_tail, layer_task);
 							layer_task->done = true;
 							t_logical->working_batch = batch;
-#ifdef DEBUG
+#ifdef DEBUG_SCHEDULE
 							fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "PUSH", s_logical->id, t_logical->id, t_phisical->cur_t_dev_t);
 #endif
 						}
@@ -450,7 +530,7 @@ void execute(executable* head, int max_gen) {
 			}
 			executable* tmp = layer_task;
 			layer_task = layer_task->next;
-			if (tmp->done == true) {
+			if (tmp->done) {
 				free(tmp);
 			}
 		}
@@ -458,11 +538,30 @@ void execute(executable* head, int max_gen) {
 			cudaStreamSynchronize(streams[i]);
 		}
 		//critical region end
+		layer_t* updated_layer = updated_layer_head;
+		while (updated_layer) {
+#ifdef DEBUG_DATA
+				cudaMemcpy(updated_layer->dev_t[updated_layer->cur_s_dev_t], updated_layer->t, updated_layer->size * sizeof(gen_t), cudaMemcpyDeviceToHost);
+				fprintf(stdout, "LAYER[%d]:{", updated_layer->id);
+				for (int i = 0; i < updated_layer->size; i++) {
+					fprintf(stdout, " %f,", updated_layer->t[i].t);
+				}
+				fprintf(stdout, " }\n");
+#endif // DEBUG_DATA
+			remove_updated_layer(&updated_layer_head, &updated_layer_tail, updated_layer);
+			updated_layer = updated_layer->updated_next;
+		}
 	}
 }
 
-void emit_layer(layer_t* l, float* t) {
-	cudaMemcpy(l->dev_t, t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
+void emit_layer(layer_t* l) {
+	srand(time(NULL));
+
+	int size = l->size;
+	for (int i = 0; i < size; i++) {
+		l->t[i].t = float(rand()) / float(RAND_MAX) / 2.0f - 1.0f;
+	}
+	cudaMemcpy(l->dev_t, l->t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
 }
 
 int main(int argc, char* argv[])
@@ -544,8 +643,7 @@ int main(int argc, char* argv[])
 
 	friedrich_talking(9999);
 
-	float input = 1.0;
-	emit_layer(pick_layer(0), &input);
+	emit_layer(pick_layer(0));
 
 	execute(new_executable(1, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer),200);
 
