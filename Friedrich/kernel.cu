@@ -93,10 +93,8 @@ __global__ void default_clear_push_full(const gen_t *s, gen_t *t, int soffset, i
 	int j = threadIdx.x + soffset;
 	for (int i = toffset; i < ts; i++) {
 		t[i].t = 0.0;
-		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[i*j + i].t;
-			w[i*j + i].working_gen = gen;
-		}
+		t[i].t += s[j].t * w[i*j + i].t;
+		w[i*j + i].working_gen = gen;
 	}
 }
 
@@ -104,33 +102,27 @@ __global__ void default_push_full(const gen_t *s, gen_t *t, int soffset, int tof
 {
 	int j = threadIdx.x + soffset;
 	for (int i = toffset; i < ts; i++) {
-		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[i*j + i].t;
-			w[i*j + i].working_gen = gen;
-		}
+		t[i].t += s[j].t * w[i*j + i].t;
+		w[i*j + i].working_gen = gen;
 	}
 }
 
 __global__ void default_clear_pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
-	int j = soffset;
+	int j = threadIdx.x + soffset;
 	t[i].t = 0.0;
-	if (s[j].t > 0.0) {
-		t[i].t += s[j].t * w[j].t;
-		w[j].working_gen = gen;
-	}
+	t[i].t += s[j].t * w[threadIdx.x].t;
+	w[j].working_gen = gen;
 }
 
 __global__ void default_pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
-	int j = soffset;
+	int j = threadIdx.x + soffset;
 	t[i].t = 0.0;
-	if (s[j].t > 0.0) {
-		t[i].t += s[j].t * w[j].t;
-		w[j].working_gen = gen;
-	}
+	t[i].t += s[j].t * w[threadIdx.x].t;
+	w[j].working_gen = gen;
 }
 
 __global__ void default_clear_pull_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
@@ -138,10 +130,8 @@ __global__ void default_clear_pull_full(const gen_t *s, gen_t *t, int soffset, i
 	int i = threadIdx.x + toffset;
 	for (int j = soffset; j < ss; j++) {
 		t[i].t = 0.0;
-		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[i*j + j].t;
-			w[i*j + j].working_gen = gen;
-		}
+		t[i].t += s[j].t * w[i*j + j].t;
+		w[i*j + j].working_gen = gen;
 	}
 }
 
@@ -149,10 +139,8 @@ __global__ void default_pull_full(const gen_t *s, gen_t *t, int soffset, int tof
 {
 	int i = threadIdx.x + toffset;
 	for (int j = soffset; j < ss; j++) {
-		if (s[j].t > 0.0) {
-			t[i].t += s[j].t * w[i*j + j].t;
-			w[i*j + j].working_gen = gen;
-		}
+		t[i].t += s[j].t * w[i*j + j].t;
+		w[i*j + j].working_gen = gen;
 	}
 }
 
@@ -541,7 +529,7 @@ void execute(executable* head, int max_gen) {
 		layer_t* updated_layer = updated_layer_head;
 		while (updated_layer) {
 #ifdef DEBUG_DATA
-				cudaMemcpy(updated_layer->dev_t[updated_layer->cur_s_dev_t], updated_layer->t, updated_layer->size * sizeof(gen_t), cudaMemcpyDeviceToHost);
+				cudaMemcpy(updated_layer->t, updated_layer->dev_t[updated_layer->cur_s_dev_t], updated_layer->size * sizeof(gen_t), cudaMemcpyDeviceToHost);
 				fprintf(stdout, "LAYER[%d]:{", updated_layer->id);
 				for (int i = 0; i < updated_layer->size; i++) {
 					fprintf(stdout, " %f,", updated_layer->t[i].t);
@@ -559,9 +547,9 @@ void emit_layer(layer_t* l) {
 
 	int size = l->size;
 	for (int i = 0; i < size; i++) {
-		l->t[i].t = float(rand()) / float(RAND_MAX) / 2.0f - 1.0f;
+		l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
 	}
-	cudaMemcpy(l->dev_t, l->t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
+	cudaMemcpy(l->dev_t[l->cur_t_dev_t], l->t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
 }
 
 int main(int argc, char* argv[])
@@ -618,8 +606,8 @@ int main(int argc, char* argv[])
 	has_layer_phsical(3, 3);
 	has_layer_logical(30, 3, 0, 3, true);
 	has_layer_logical(31, 3, 0, 1, false);
-	has_layer_logical(32, 3, 3, 1, false);
-	has_layer_logical(33, 3, 6, 1, false);
+	has_layer_logical(32, 3, 1, 1, false);
+	has_layer_logical(33, 3, 2, 1, false);
 
 	has_link(0, LINK_FORWARD, NULL, 0, NULL, 1);
 
