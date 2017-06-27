@@ -168,7 +168,7 @@ void default_init_device() {
 		next_l->t = (gen_w*)malloc(sizeof(gen_w)*size);
 		for (int i = 0; i < size; i++) {
 			if (next_l->id > 0) {
-				next_l->t[i].t = float(rand()) / float(RAND_MAX);
+				next_l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
 			}
 			else {
 				next_l->t[i].t = 1.0f;
