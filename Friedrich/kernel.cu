@@ -10,235 +10,32 @@ TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug), 部分完成，增加
 TODO: 增加不同连接方式（1:1/n:n）
 TODO: 增加不更新权重连接支持（mute_fn为NULL）
 */
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
 #include <stdio.h>
 #include "mpi.h" 
 #include <Windows.h>
 #include <memory.h>
-#include <time.h>
 #include <stdlib.h>
 
-#include "../../Ludwig/Ludwig/ludwig_neural_network.h"
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
 #include "../../Ludwig/Ludwig/ludwig_net.h"
 #pragma comment(lib, "../../Ludwig/x64/Debug/Ludwig.lib")
+#include "executable.h"
 
 #include "net.h"
+#include "profile.h"
 
 #define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
 #define DEBUG_SCHEDULE
 #define DEBUG_DATA
-
-enum execute_type {
-	EXECUTE_LAYER,
-	EXECUTE_LINK
-};
 
 typedef void(*fp_integrate)(gen_t*, int);
 typedef void(*fp_mute)(gen_w*, const unsigned long long);
 typedef void(*fp_clear_push)(const gen_t *, gen_t *, int, gen_w*, const int, const unsigned long long);
 typedef void(*fp_push)(const gen_t*, gen_t*, int, gen_w*, const int, const unsigned long long);
 
-struct executable {
-	unsigned long long gen;
-	execute_type type;
-	layer_t* s;
-	link* l;
-	layer_t* t;
-	executable* pre;
-	executable* next;
-	bool done;
-};
-
-struct map {
-	int size;
-	float* dev_t;
-};
-
-__constant__ map w_mutes;
 int thread_num;
 layer_t* layer_list = 0;
-
-__global__ void default_integrate(gen_t* s, int offset) {
-	int i = threadIdx.x + offset;
-	if (s[i].t > 0.0) {
-		s[i].t = 1.0;
-	}else {
-		s[i].t = -1.0;
-	}
-}
-
-__global__ void default_mute(gen_w* w, const unsigned long long gen) {
-	/*
-	int i = threadIdx.x;
-	if (w[i].working_gen == gen) {
-		int gap = gen - w[i].gen;
-		if (gap == 1) {
-			w[i].stage++;
-		}
-		else {
-			w[i].stage = 0;
-		}
-		if (w[i].stage < w_mutes.size) {
-			w[i].t += w_mutes.dev_t[w->stage];
-		}
-		w[i].gen = gen;
-	}
-	*/
-}
-
-__global__ void default_clear_push_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ts, const unsigned long long gen)
-{
-	int j = threadIdx.x + soffset;
-	for (int i = toffset; i < ts; i++) {
-		t[i].t = 0.0;
-		t[i].t += s[j].t * w[i*j + i].t;
-		w[i*j + i].working_gen = gen;
-	}
-}
-
-__global__ void default_push_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ts, const unsigned long long gen)
-{
-	int j = threadIdx.x + soffset;
-	for (int i = toffset; i < ts; i++) {
-		t[i].t += s[j].t * w[i*j + i].t;
-		w[i*j + i].working_gen = gen;
-	}
-}
-
-__global__ void default_clear_pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
-{
-	int i = threadIdx.x + toffset;
-	int j = threadIdx.x + soffset;
-	t[i].t = 0.0;
-	t[i].t += s[j].t * w[threadIdx.x].t;
-	w[j].working_gen = gen;
-}
-
-__global__ void default_pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
-{
-	int i = threadIdx.x + toffset;
-	int j = threadIdx.x + soffset;
-	t[i].t = 0.0;
-	t[i].t += s[j].t * w[threadIdx.x].t;
-	w[j].working_gen = gen;
-}
-
-__global__ void default_clear_pull_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
-{
-	int i = threadIdx.x + toffset;
-	for (int j = soffset; j < ss; j++) {
-		t[i].t = 0.0;
-		t[i].t += s[j].t * w[i*j + j].t;
-		w[i*j + j].working_gen = gen;
-	}
-}
-
-__global__ void default_pull_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
-{
-	int i = threadIdx.x + toffset;
-	for (int j = soffset; j < ss; j++) {
-		t[i].t += s[j].t * w[i*j + j].t;
-		w[i*j + j].working_gen = gen;
-	}
-}
-
-void default_init_device() {
-	srand(time(NULL));
-
-	layer_t* next = pick_layer(0);
-	while (next) {
-		int size = next->size;
-		if (size > 0) {
-			next->t = (gen_t*)malloc(sizeof(gen_t)*size);
-			//TODO: initialize gen_t?
-			cudaMalloc((void**)&next->dev_t[0], size * sizeof(gen_t));
-			cudaMemcpy(next->dev_t[0], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
-			cudaMalloc((void**)&next->dev_t[1], size * sizeof(gen_t));
-			cudaMemcpy(next->dev_t[1], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
-		}
-		next = next->follow;
-	}
-
-	link* next_l = pick_link(0);
-	while (next_l) {
-		int size = next_l->size;
-
-		next_l->t = (gen_w*)malloc(sizeof(gen_w)*size);
-		for (int i = 0; i < size; i++) {
-			if (next_l->id > 0) {
-				next_l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
-			}
-			else {
-				next_l->t[i].t = 1.0f;
-			}
-		}
-		cudaMalloc((void**)&next_l->dev_t, size * sizeof(gen_w));
-		cudaMemcpy(next_l->dev_t, next_l->t, size * sizeof(gen_w), cudaMemcpyHostToDevice);
-		
-		next_l = next_l->follow;
-	}
-}
-
-executable* new_executable(int gen, execute_type type, layer_t* s, link* l, layer_t* t) {
-	executable* ret = (executable*)malloc(sizeof(executable));
-	memset(ret, 0, sizeof(executable));
-	ret->gen = gen;
-	ret->type = type;
-	ret->s = s;
-	ret->l = l;
-	ret->t = t;
-	ret->done = false;
-	return ret;
-}
-
-void append_executable(executable** head, executable** tail, executable* n) {
-	if (!*head) {
-		*head = n;
-	}
-	if (*tail) {
-		(*tail)->next = n;
-		(*tail)->next->pre = *tail;
-		(*tail) = (*tail)->next;
-	}
-	else {
-		*tail = n;
-	}
-}
-
-void remove_executable(executable** head, executable** tail, executable* e) {
-	if (e->pre) {
-		e->pre->next = e->next;
-		if (!e->pre->pre) {
-			*head = e->pre;
-			if (*head) {
-				(*head)->next = e->next;
-			}
-		}
-	}
-	else {
-		*head = e->next;
-		if (*head) {
-			(*head)->next = e->next->next;
-		}
-	}
-	if (e->next) {
-		e->next->pre = e->pre;
-		if (!e->next->next) {
-			*tail = e->next;
-			if (*tail) {
-				(*tail)->pre = e->pre;
-			}
-		}
-	}
-	else {
-		*tail = e->pre;
-		if (*tail) {
-			(*tail)->pre = e->pre->pre;
-		}
-	}
-}
 
 void append_updated_layer(layer_t** head, layer_t** tail, layer_t* n) {
 	if (!*head) {
@@ -254,37 +51,39 @@ void append_updated_layer(layer_t** head, layer_t** tail, layer_t* n) {
 	}
 }
 
-void remove_updated_layer(layer_t** head, layer_t** tail, layer_t* e) {
-	if (e->updated_pre) {
-		e->updated_pre->updated_next = e->updated_next;
-		if (!e->updated_pre->updated_pre) {
-			*head = e->updated_pre;
+void remove_updated_layer(layer_t** head, layer_t** tail, layer_t* l) {
+	if (l->updated_pre) {
+		l->updated_pre->updated_next = l->updated_next;
+		if (!l->updated_pre->updated_pre) {
+			*head = l->updated_pre;
 			if (*head) {
-				(*head)->updated_next = e->updated_next;
+				(*head)->updated_next = l->updated_next;
 			}
 		}
 	}
 	else {
-		*head = e->updated_next;
+		*head = l->updated_next;
 		if (*head) {
-			(*head)->updated_next = e->updated_next->updated_next;
+			(*head)->updated_next = l->updated_next->updated_next;
 		}
 	}
-	if (e->updated_next) {
-		e->updated_next->updated_pre = e->updated_pre;
-		if (!e->updated_next->updated_next) {
-			*tail = e->updated_next;
+	if (l->updated_next) {
+		l->updated_next->updated_pre = l->updated_pre;
+		if (!l->updated_next->updated_next) {
+			*tail = l->updated_next;
 			if (*tail) {
-				(*tail)->updated_pre = e->updated_pre;
+				(*tail)->updated_pre = l->updated_pre;
 			}
 		}
 	}
 	else {
-		*tail = e->updated_pre;
+		*tail = l->updated_pre;
 		if (*tail) {
-			(*tail)->updated_pre = e->updated_pre->updated_pre;
+			(*tail)->updated_pre = l->updated_pre->updated_pre;
 		}
 	}
+	l->updated_next = NULL;
+	l->updated_pre = NULL;
 }
 
 void swap_layer_dev(layer_t* l) {
@@ -331,7 +130,7 @@ void wrap_layers(executable* task, layer_t** s_phisical, layer_t** t_phisical, l
 	}
 }
 
-void execute(executable* head, int max_gen) {
+void execute(int max_gen) {
 	unsigned long long gen = 1;
 	unsigned long long batch = 0;
 	const int task_width = 10;
@@ -344,10 +143,12 @@ void execute(executable* head, int max_gen) {
 
 	executable* link_task_head = NULL;
 	executable* link_task_tail = NULL;
-	executable* layer_task_head = head;
-	executable* layer_task_tail = head;
+	executable* layer_task_head = NULL;
+	executable* layer_task_tail = NULL;
 	layer_t* updated_layer_head = NULL;
 	layer_t* updated_layer_tail = NULL;
+
+	external_input(&layer_task_head, &layer_task_tail, gen);
 
 	while (layer_task_head) {
 		//critical region begin
@@ -364,10 +165,12 @@ void execute(executable* head, int max_gen) {
 #endif
 			gen++;
 
+			external_input(&layer_task_head, &layer_task_tail, gen);
+
 			executable* link_task = link_task_head;
 			while (link_task) {			
 				while (link_task && tasks < task_width) {
-					default_mute << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t, gen);
+					mute << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t, gen);
 					remove_executable(&link_task_head, &link_task_tail, link_task);
 					link_task->done = true;
 					tasks++;
@@ -389,13 +192,6 @@ void execute(executable* head, int max_gen) {
 					tasks = 0;
 				}
 			}
-
-			/*
-			pick_layer(0)->integrated_gen = gen;
-			layer_task_head->pre=new_executable(gen, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer);
-			layer_task_head->pre->next = layer_task_head;
-			layer_task_head = layer_task_head->pre;
-			*/
 		}
 
 		executable* layer_task = layer_task_head;
@@ -413,7 +209,7 @@ void execute(executable* head, int max_gen) {
 				}
 				if (s_logical->integrated_gen != gen) {
 					if (s_phisical->integrated_gen != gen) {
-						default_integrate << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
+						integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
 						layer_task->done = false;
 						tasks++;
 						s_phisical->integrated_gen = gen;
@@ -431,14 +227,14 @@ void execute(executable* head, int max_gen) {
 						if (t_logical->working_gen != gen) {
 							switch (layer_task->l->type) {
 							case LINK_FORWARD:
-								default_clear_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+								clear_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
 								break;
 							case LINK_FULL:
 								if (s_logical->size <= t_logical->size) {
-									default_clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+									clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
 								}
 								else {
-									default_clear_push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, t_logical->size, gen);
+									clear_push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, t_logical->size, gen);
 								}
 							}
 							tasks++;
@@ -487,14 +283,14 @@ void execute(executable* head, int max_gen) {
 						else if (t_logical->working_batch != batch){
 							switch (layer_task->l->type) {
 							case LINK_FORWARD:
-								default_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+								pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
 								break;
 							case LINK_FULL:
 								if (s_logical->size <= t_logical->size) {
-									default_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
+									pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, s_logical->size, gen);
 								}
 								else {
-									default_push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, t_logical->size, gen);
+									push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], t_phisical->dev_t[t_phisical->cur_t_dev_t], s_logical->offset, t_logical->offset, layer_task->l->dev_t, t_logical->size, gen);
 								}
 							}
 							tasks++;
@@ -536,20 +332,11 @@ void execute(executable* head, int max_gen) {
 				}
 				fprintf(stdout, " }\n");
 #endif // DEBUG_DATA
-			remove_updated_layer(&updated_layer_head, &updated_layer_tail, updated_layer);
-			updated_layer = updated_layer->updated_next;
+				layer_t* tmp = updated_layer->updated_next;
+				remove_updated_layer(&updated_layer_head, &updated_layer_tail, updated_layer);
+				updated_layer = tmp;
 		}
 	}
-}
-
-void emit_layer(layer_t* l) {
-	srand(time(NULL));
-
-	int size = l->size;
-	for (int i = 0; i < size; i++) {
-		l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
-	}
-	cudaMemcpy(l->dev_t[l->cur_t_dev_t], l->t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
 }
 
 int main(int argc, char* argv[])
@@ -589,51 +376,15 @@ int main(int argc, char* argv[])
 	float host_t[10] = { 1.0 };
 	cudaMemcpyToSymbol(w_mutes.dev_t, &host_t, w_mutes.size * sizeof(gen_w));
 
-	has_layer_phsical(0, 9);
+	construct_network();
 
-	has_layer_phsical(1, 9);
-	has_layer_logical(11, 1, 0, 3, false);
-	has_layer_logical(12, 1, 3, 3, false);
-	has_layer_logical(13, 1, 6, 3, false);
-
-	has_layer_phsical(21, 3);
-	has_layer_logical(210, 21, 0, 3, true);
-	has_layer_phsical(22, 3);
-	has_layer_logical(220, 22, 0, 3, true);
-	has_layer_phsical(23, 3);
-	has_layer_logical(230, 23, 0, 3, true);
-
-	has_layer_phsical(3, 3);
-	has_layer_logical(30, 3, 0, 3, true);
-	has_layer_logical(31, 3, 0, 1, false);
-	has_layer_logical(32, 3, 1, 1, false);
-	has_layer_logical(33, 3, 2, 1, false);
-
-	has_link(0, LINK_FORWARD, NULL, 0, NULL, 1);
-
-	has_link(1, LINK_FORWARD, NULL, 11, NULL, 21);
-	has_link(2, LINK_FORWARD, NULL, 12, NULL, 22);
-	has_link(3, LINK_FORWARD, NULL, 13, NULL, 23);
-
-	has_link(4, LINK_FULL, NULL, 21, NULL, 31);
-	has_link(5, LINK_FULL, NULL, 22, NULL, 32);
-	has_link(6, LINK_FULL, NULL, 23, NULL, 33);
-
-	has_link(7, LINK_FULL, NULL, 21, NULL, 210);
-	has_link(8, LINK_FULL, NULL, 22, NULL, 220);
-	has_link(9, LINK_FULL, NULL, 23, NULL, 230);
-
-	has_link(10, LINK_FULL, NULL, 3, NULL, 30);
-
-	default_init_device();
+	init_network();
 
 	friedrich_acts(net_events::EVENT_TEST, acts_test);
 
 	friedrich_talking(9999);
 
-	emit_layer(pick_layer(0));
-
-	execute(new_executable(1, EXECUTE_LAYER, pick_layer(0), pick_layer(0)->next, pick_layer(0)->next->layer),200);
+	execute(200);
 
 	// Copy output vector from GPU buffer to host memory.
 	//cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
