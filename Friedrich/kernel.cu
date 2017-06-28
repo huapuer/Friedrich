@@ -209,7 +209,7 @@ void execute(int max_gen) {
 				}
 				if (s_logical->integrated_gen != gen) {
 					if (s_phisical->integrated_gen != gen) {
-						integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t], s_logical->offset);
+						integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t]);
 						layer_task->done = false;
 						tasks++;
 						s_phisical->integrated_gen = gen;

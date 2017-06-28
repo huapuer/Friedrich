@@ -14,8 +14,8 @@ struct map {
 
 __constant__ map w_mutes;
 
-__global__ void integrate(gen_t* s, int offset) {
-	int i = threadIdx.x + offset;
+__global__ void integrate(gen_t* s) {
+	int i = threadIdx.x;
 	if (s[i].t > 0.0) {
 		s[i].t = 1.0;
 	}
