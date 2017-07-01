@@ -18,12 +18,31 @@ __global__ void integrate(float* s) {
 	/*
 	int i = threadIdx.x;
 	if (s[i].t > 0.0) {
+	s[i].t = 1.0;
+	}
+	else {
+	s[i].t = -1.0;
+	}
+	*/
+}
+
+__global__ void push_forward(float* s) {
+	/*
+	int i = threadIdx.x;
+	if (s[i].t > 0.0) {
 		s[i].t = 1.0;
 	}
 	else {
 		s[i].t = -1.0;
 	}
 	*/
+}
+
+__global__ void push_full(float* s, int soffset, float* w, float* r, const int ss, const int ts) {
+	for (int i = 0; i < ts; i++) {
+		int idx = i*ss + threadIdx.x;
+		r[idx] = s[threadIdx.x + soffset] * w[idx];
+	}
 }
 
 __global__ void mute(float* w, const unsigned long long gen) {
@@ -60,20 +79,20 @@ __global__ void pull_forward(const float *s, float *t, int soffset, int toffset,
 	t[i] += s[j] * w[threadIdx.x];
 }
 
-__global__ void clear_pull_full(const float *s, float *t, int soffset, int toffset, float* w, const int ss, const unsigned long long gen)
+__global__ void clear_pull_full(float *t, int toffset, float* r, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
 	t[i] = 0.0;
 	for (int j = 0; j < ss; j++) {
-		t[i] += s[j + soffset] * w[threadIdx.x*ss + j];
+		t[i] += r[threadIdx.x*ss + j];
 	}
 }
 
-__global__ void pull_full(const float *s, float *t, int soffset, int toffset, float* w, const int ss, const unsigned long long gen)
+__global__ void pull_full(float *t, int toffset, float* r, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
 	for (int j = 0; j < ss; j++) {
-		t[i] += s[j + soffset] * w[threadIdx.x*ss + j];
+		t[i] +=r[threadIdx.x*ss + j];
 	}
 }
 
@@ -152,6 +171,8 @@ void init_network() {
 		}
 		cudaMalloc((void**)&next_l->dev_t.t, size * sizeof(float));
 		cudaMemcpy(next_l->dev_t.t, next_l->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
+
+		cudaMalloc((void**)&next_l->dev_t.r, size * sizeof(float));
 
 		next_l = next_l->follow;
 	}
