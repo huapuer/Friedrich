@@ -14,7 +14,7 @@ struct map {
 
 __constant__ map w_mutes;
 
-__global__ void integrate(gen_t* s) {
+__global__ void integrate(float* s) {
 	/*
 	int i = threadIdx.x;
 	if (s[i].t > 0.0) {
@@ -26,7 +26,7 @@ __global__ void integrate(gen_t* s) {
 	*/
 }
 
-__global__ void mute(gen_w* w, const unsigned long long gen) {
+__global__ void mute(float* w, const unsigned long long gen) {
 	/*
 	int i = threadIdx.x;
 	if (w[i].working_gen == gen) {
@@ -45,39 +45,35 @@ __global__ void mute(gen_w* w, const unsigned long long gen) {
 	*/
 }
 
-__global__ void clear_pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void clear_pull_forward(const float *s, float *t, int soffset, int toffset, float* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
 	int j = threadIdx.x + soffset;
-	t[i].t = 0.0;
-	t[i].t += s[j].t * w[threadIdx.x].t;
-	w[j].working_gen = gen;
+	t[i] = 0.0;
+	t[i] += s[j] * w[threadIdx.x];
 }
 
-__global__ void pull_forward(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void pull_forward(const float *s, float *t, int soffset, int toffset, float* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
 	int j = threadIdx.x + soffset;
-	t[i].t += s[j].t * w[threadIdx.x].t;
-	w[i*ss + threadIdx.x].working_gen = gen;
+	t[i] += s[j] * w[threadIdx.x];
 }
 
-__global__ void clear_pull_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void clear_pull_full(const float *s, float *t, int soffset, int toffset, float* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
-	t[i].t = 0.0;
+	t[i] = 0.0;
 	for (int j = 0; j < ss; j++) {
-		t[i].t += s[j + soffset].t * w[threadIdx.x*ss + j].t;
-		w[threadIdx.x*ss + j].working_gen = gen;
+		t[i] += s[j + soffset] * w[threadIdx.x*ss + j];
 	}
 }
 
-__global__ void pull_full(const gen_t *s, gen_t *t, int soffset, int toffset, gen_w* w, const int ss, const unsigned long long gen)
+__global__ void pull_full(const float *s, float *t, int soffset, int toffset, float* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
 	for (int j = 0; j < ss; j++) {
-		t[i].t += s[j + soffset].t * w[threadIdx.x*ss + j].t;
-		w[threadIdx.x*ss + j].working_gen = gen;
+		t[i] += s[j + soffset] * w[threadIdx.x*ss + j];
 	}
 }
 
@@ -130,13 +126,13 @@ void init_network() {
 	while (next) {
 		int size = next->size;
 		if (size > 0) {
-			next->t = (gen_t*)malloc(sizeof(gen_t)*size);
-			//memset(next->t, 0, sizeof(gen_t)*size);
-			//TODO: initialize gen_t?
-			cudaMalloc((void**)&next->dev_t[0], size * sizeof(gen_t));
-			cudaMemcpy(next->dev_t[0], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
-			cudaMalloc((void**)&next->dev_t[1], size * sizeof(gen_t));
-			cudaMemcpy(next->dev_t[1], next->t, size * sizeof(gen_t), cudaMemcpyHostToDevice);
+			next->host_t.t = (float*)malloc(sizeof(float)*size);
+			//memset(next->t, 0, sizeof(float)*size);
+			//TODO: initialize float?
+			cudaMalloc((void**)&next->dev_t[0].t, size * sizeof(float));
+			cudaMemcpy(next->dev_t[0].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
+			cudaMalloc((void**)&next->dev_t[1].t, size * sizeof(float));
+			cudaMemcpy(next->dev_t[1].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
 		}
 		next = next->follow;
 	}
@@ -145,17 +141,17 @@ void init_network() {
 	while (next_l) {
 		int size = next_l->size;
 
-		next_l->t = (gen_w*)malloc(sizeof(gen_w)*size);
+		next_l->host_t.t = (float*)malloc(sizeof(float)*size);
 		for (int i = 0; i < size; i++) {
 			//if (next_l->id > 0) {
 			//	next_l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
 			//}
 			//else {
-				next_l->t[i].t = 1.0f;
+				next_l->host_t.t[i] = 1.0f;
 			//}
 		}
-		cudaMalloc((void**)&next_l->dev_t, size * sizeof(gen_w));
-		cudaMemcpy(next_l->dev_t, next_l->t, size * sizeof(gen_w), cudaMemcpyHostToDevice);
+		cudaMalloc((void**)&next_l->dev_t.t, size * sizeof(float));
+		cudaMemcpy(next_l->dev_t.t, next_l->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
 
 		next_l = next_l->follow;
 	}
@@ -170,10 +166,10 @@ void external_input(executable** head, executable** tail, unsigned long long gen
 		int size = l->size;
 		for (int i = 0; i < size; i++) {
 			//l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
-			l->t[i].t = 0.1 + i / (size / 3) * 0.1;
+			l->host_t.t[i] = 0.1 + i / (size / 3) * 0.1;
 		}
-		cudaMemcpy(l->dev_t[l->cur_t_dev_t], l->t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
-		cudaMemcpy(l->dev_t[l->cur_s_dev_t], l->t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
+		cudaMemcpy(l->dev_t[l->cur_t_dev_t].t, l->host_t.t, l->size * sizeof(float), cudaMemcpyHostToDevice);
+		cudaMemcpy(l->dev_t[l->cur_s_dev_t].t, l->host_t.t, l->size * sizeof(float), cudaMemcpyHostToDevice);
 	}
 
 	prepend_executable(head, tail, new_executable(gen, EXECUTE_LAYER, l, l->next, l->next->layer));
