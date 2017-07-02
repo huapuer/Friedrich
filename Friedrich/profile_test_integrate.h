@@ -15,6 +15,11 @@ struct map {
 __constant__ map w_mutes;
 
 __global__ void integrate(float* s) {
+	int i = threadIdx.x;
+	s[i] *= 2.0f;
+}
+
+__global__ void push_forward(float* s) {
 	/*
 	int i = threadIdx.x;
 	if (s[i].t > 0.0) {
@@ -22,18 +27,6 @@ __global__ void integrate(float* s) {
 	}
 	else {
 	s[i].t = -1.0;
-	}
-	*/
-}
-
-__global__ void push_forward(float* s) {
-	/*
-	int i = threadIdx.x;
-	if (s[i].t > 0.0) {
-		s[i].t = 1.0;
-	}
-	else {
-		s[i].t = -1.0;
 	}
 	*/
 }
@@ -92,7 +85,7 @@ __global__ void pull_full(float *t, int toffset, float* r, const int ss, const u
 {
 	int i = threadIdx.x + toffset;
 	for (int j = 0; j < ss; j++) {
-		t[i] +=r[threadIdx.x*ss + j];
+		t[i] += r[threadIdx.x*ss + j];
 	}
 }
 
@@ -166,7 +159,7 @@ void init_network() {
 			//	next_l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
 			//}
 			//else {
-				next_l->host_t.t[i] = 1.0f;
+			next_l->host_t.t[i] = 1.0f;
 			//}
 		}
 		cudaMalloc((void**)&next_l->dev_t.t, size * sizeof(float));

@@ -30,10 +30,10 @@ __global__ void push_forward(float* s) {
 	/*
 	int i = threadIdx.x;
 	if (s[i].t > 0.0) {
-		s[i].t = 1.0;
+	s[i].t = 1.0;
 	}
 	else {
-		s[i].t = -1.0;
+	s[i].t = -1.0;
 	}
 	*/
 }
@@ -46,22 +46,8 @@ __global__ void push_full(float* s, int soffset, float* w, float* r, const int s
 }
 
 __global__ void mutate(float* w, const unsigned long long gen) {
-	/*
 	int i = threadIdx.x;
-	if (w[i].working_gen == gen) {
-	int gap = gen - w[i].gen;
-	if (gap == 1) {
-	w[i].stage++;
-	}
-	else {
-	w[i].stage = 0;
-	}
-	if (w[i].stage < w_mutes.size) {
-	w[i].t += w_mutes.dev_t[w->stage];
-	}
-	w[i].gen = gen;
-	}
-	*/
+	w[i] *= 2.0f;
 }
 
 __global__ void clear_pull_forward(const float *s, float *t, int soffset, int toffset, float* w, const int ss, const unsigned long long gen)
@@ -92,7 +78,7 @@ __global__ void pull_full(float *t, int toffset, float* r, const int ss, const u
 {
 	int i = threadIdx.x + toffset;
 	for (int j = 0; j < ss; j++) {
-		t[i] +=r[threadIdx.x*ss + j];
+		t[i] += r[threadIdx.x*ss + j];
 	}
 }
 
@@ -166,7 +152,7 @@ void init_network() {
 			//	next_l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
 			//}
 			//else {
-				next_l->host_t.t[i] = 1.0f;
+			next_l->host_t.t[i] = 1.0f;
 			//}
 		}
 		cudaMalloc((void**)&next_l->dev_t.t, size * sizeof(float));

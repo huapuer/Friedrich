@@ -45,7 +45,7 @@ __global__ void push_full(float* s, int soffset, float* w, float* r, const int s
 	}
 }
 
-__global__ void mute(float* w, const unsigned long long gen) {
+__global__ void mutate(float* w, const unsigned long long gen) {
 	/*
 	int i = threadIdx.x;
 	if (w[i].working_gen == gen) {

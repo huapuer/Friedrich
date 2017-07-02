@@ -26,8 +26,6 @@ TODO: 增加不更新权重连接支持（mute_fn为NULL）
 #include "profile.h"
 
 #define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
-#define DEBUG_SCHEDULE
-#define DEBUG_DATA
 
 typedef void(*fp_integrate)(gen_t*, int);
 typedef void(*fp_mute)(gen_w*, const unsigned long long);
@@ -170,7 +168,7 @@ void execute(int max_gen) {
 			executable* link_task = link_task_head;
 			while (link_task) {			
 				while (link_task && tasks < task_width) {
-					mute << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t.t, gen);
+					mutate << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t.t, gen);
 					remove_executable(&link_task_head, &link_task_tail, link_task);
 					link_task->done = true;
 					tasks++;
