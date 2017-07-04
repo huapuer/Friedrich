@@ -4,7 +4,8 @@
 
 enum execute_type {
 	EXECUTE_LAYER,
-	EXECUTE_LINK
+	EXECUTE_LINK,
+	EXECUTE_JOINT
 };
 
 struct executable {

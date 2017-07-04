@@ -6,7 +6,7 @@ DESG: 加入逻辑层，逻辑层引用物理层的一部分或全部数据
 	  物理层持有引用自己的逻辑层的引用，物理层被更新时负责同步更新逻辑层状态，并检查逻辑层输出并添加任务到调度器
 DESG: Host Scheduler与Slave Batch进行解耦，实现Host与Slave并行作业，隐藏Host端调度开销
 
-TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug), 部分完成，增加子逻辑层输出情况测试(layer1->layer2)
+TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug), 部分完成，增加子逻辑层输出情况测试(layer1->t_layer2)
 TODO: 增加不同连接方式（1:1/n:n）
 TODO: 增加不更新权重连接支持（mute_fn为NULL）
 */
@@ -131,7 +131,7 @@ void wrap_layers(executable* task, layer_t** s_phisical, layer_t** t_phisical, l
 void execute(int max_gen) {
 	unsigned long long gen = 1;
 	unsigned long long batch = 0;
-	const int task_width = 10;
+	const int task_width = 100;
 	int tasks = 0;
 	cudaStream_t streams[task_width];
 	for (int i = 0; i<task_width; i++)
@@ -139,8 +139,6 @@ void execute(int max_gen) {
 		cudaStreamCreate(&streams[i]);
 	}
 
-	executable* link_task_head = NULL;
-	executable* link_task_tail = NULL;
 	executable* layer_task_head = NULL;
 	executable* layer_task_tail = NULL;
 	layer_t* updated_layer_head = NULL;
@@ -164,32 +162,6 @@ void execute(int max_gen) {
 			gen++;
 
 			external_input(&layer_task_head, &layer_task_tail, gen);
-
-			executable* link_task = link_task_head;
-			while (link_task) {			
-				while (link_task && tasks < task_width) {
-					mutate << <link_task->l->size / thread_num + 1, link_task->l->size>thread_num ? thread_num : link_task->l->size, 0, streams[tasks] >> >(link_task->l->dev_t.t, gen);
-					remove_executable(&link_task_head, &link_task_tail, link_task);
-					link_task->done = true;
-					tasks++;
-					link_task->l->mutating_batch = batch;
-#ifdef DEBUG_SCHEDULE
-					layer_t *s_phisical, *t_phisical, *s_logical, *t_logical;
-					wrap_layers(link_task, &s_phisical, &t_phisical, &s_logical, &t_logical);
-					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "MUTW", s_logical->id, t_logical->id);
-#endif
-					executable* tmp = link_task;
-					link_task = link_task->next;
-					free(tmp);
-				}
-				if (tasks == task_width) {
-					for (int i = 0; i < tasks; i++) {
-						cudaStreamSynchronize(streams[i]);
-					}
-					batch++;
-					tasks = 0;
-				}
-			}
 		}
 
 		executable* layer_task = layer_task_head;
@@ -197,123 +169,170 @@ void execute(int max_gen) {
 			if (layer_task->gen == gen && tasks < task_width) {
 				layer_t *s_phisical, *t_phisical, *s_logical, *t_logical;
 				wrap_layers(layer_task, &s_phisical, &t_phisical, &s_logical, &t_logical);
-				if (s_phisical->swap_gen != gen) {
-					swap_layer_dev(s_phisical);
-					s_phisical->swap_gen = gen;
-				}
-				if (t_phisical->swap_gen != gen) {
-					swap_layer_dev(t_phisical);
-					t_phisical->swap_gen = gen;
-				}
-				if (s_logical->integrated_gen != gen) {
-					if (s_phisical->integrated_gen != gen) {
-						integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t);
-						layer_task->done = false;
-						tasks++;
-						s_phisical->integrated_gen = gen;
+				switch (layer_task->type) {
+				case EXECUTE_JOINT:
+					if (layer_task->s->integrating_batch != batch) {
+#ifdef DEBUG_SCHEDULE
+						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "CUNT", s_logical->id, t_logical->id, s_logical->cur_s_dev_t);
+#endif
+						//tasks++;
 
-						append_updated_layer(&updated_layer_head, &updated_layer_tail, s_phisical);
+						layer_task->l->counting_batch = batch;
+
+						executable* n = new_executable(gen, EXECUTE_LINK, s_logical, layer_task->l, layer_task->l->t_layer);
+						prepend_executable(&layer_task_head, &layer_task_tail, n);
+
+						remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+						layer_task->done = true;
 					}
-					s_logical->integrated_gen = gen;
-					s_logical->integrating_batch = batch;
+					break;
+				case EXECUTE_LINK:
+					if (layer_task->l->counting_batch != batch) {
+						mutate << <layer_task->l->size / thread_num + 1, layer_task->l->size>thread_num ? thread_num : layer_task->l->size, 0, streams[tasks] >> >(layer_task->l->dev_t.t, gen);
+						remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+						layer_task->done = true;
+						tasks++;
+						layer_task->l->mutating_batch = batch;
 #ifdef DEBUG_SCHEDULE
-					fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "INTE", s_logical->id, t_logical->id, s_phisical->cur_s_dev_t);
+						layer_t *s_phisical, *t_phisical, *s_logical, *t_logical;
+						wrap_layers(layer_task, &s_phisical, &t_phisical, &s_logical, &t_logical);
+						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d\n", gen, batch, "MUTW", s_logical->id, t_logical->id);
 #endif
-				}
-				else if(s_logical->integrating_batch != batch){
-					if (layer_task->l->mutating_batch != batch) {
-						if (layer_task->l->pushed_gen != gen) {
-							switch (layer_task->l->type) {
-							case LINK_FORWARD:
-								push_forward << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t);
-								break;
-							case LINK_FULL:
-								push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_logical->offset, layer_task->l->dev_t.t, layer_task->l->dev_t.r, s_logical->size, t_logical->size);
-								break;
-							}
+						remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+						layer_task->done = true;
+					}
+					break;
+				case EXECUTE_LAYER:
+					if (s_phisical->swap_gen != gen) {
+						swap_layer_dev(s_phisical);
+						s_phisical->swap_gen = gen;
+					}
+					if (t_phisical->swap_gen != gen) {
+						swap_layer_dev(t_phisical);
+						t_phisical->swap_gen = gen;
+					}
+					if (s_logical->integrated_gen != gen) {
+						if (s_phisical->integrated_gen != gen) {
+							integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t);
+							layer_task->done = false;
 							tasks++;
-							layer_task->l->pushed_gen = gen;
-#ifdef DEBUG_SCHEDULE
-							fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "PUSH", s_logical->id, t_logical->id, s_phisical->cur_s_dev_t);
-#endif
+							s_phisical->integrated_gen = gen;
+
+							append_updated_layer(&updated_layer_head, &updated_layer_tail, s_phisical);
 						}
-						else {
-							if (t_logical->pulling_gen != gen) {
+
+						link* pre = s_logical->pre;
+						while (pre) {
+							executable* n = new_executable(gen, EXECUTE_JOINT, pre->s_layer,  pre, s_logical);
+							prepend_executable(&layer_task_head, &layer_task_tail, n);
+							pre = pre->another_pre;
+						}
+						if (s_logical->logical_head && s_logical->logical_head->delegate) {
+							link* pre = s_phisical->logical_head->pre;
+							while (pre) {
+								executable* n = new_executable(gen, EXECUTE_JOINT, pre->s_layer, pre, s_logical);
+								prepend_executable(&layer_task_head, &layer_task_tail, n);
+								pre = pre->another_pre;
+							}
+						}
+
+						s_logical->integrated_gen = gen;
+						s_logical->integrating_batch = batch;
+#ifdef DEBUG_SCHEDULE
+						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "INTE", s_logical->id, t_logical->id, s_phisical->cur_s_dev_t);
+#endif
+					}
+					else if (s_logical->integrating_batch != batch) {
+						if (layer_task->l->mutating_batch != batch) {
+							if (layer_task->l->pushed_gen != gen) {
 								switch (layer_task->l->type) {
 								case LINK_FORWARD:
-									clear_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
+									push_forward << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t);
 									break;
 								case LINK_FULL:
-									clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_logical->offset, layer_task->l->dev_t.r, s_logical->size, gen);
+									push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_logical->offset, layer_task->l->dev_t.t, layer_task->l->dev_t.r, s_logical->size, t_logical->size);
 									break;
 								}
 								tasks++;
-								remove_executable(&layer_task_head, &layer_task_tail, layer_task);
-								layer_task->done = true;
-								link* next_link = t_logical->next;
-								while (next_link) {
-									executable* n = new_executable(gen + 1, EXECUTE_LAYER, t_logical, next_link, next_link->layer);
-									append_executable(&layer_task_head, &layer_task_tail, n);
-									next_link = next_link->another;
-								}
-								if (t_logical != t_phisical) {
-									if (t_phisical->pulling_gen != gen) {
-										link* next_link = t_phisical->next;
-										while (next_link) {
-											executable* n = new_executable(gen + 1, EXECUTE_LAYER, t_phisical, next_link, next_link->layer);
-											append_executable(&layer_task_head, &layer_task_tail, n);
-											next_link = next_link->another;
-										}
+								layer_task->l->pushed_gen = gen;
+#ifdef DEBUG_SCHEDULE
+								fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "PUSH", s_logical->id, t_logical->id, s_phisical->cur_s_dev_t);
+#endif
+							}
+							else {
+								if (t_logical->pulling_gen != gen) {
+									switch (layer_task->l->type) {
+									case LINK_FORWARD:
+										clear_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
+										break;
+									case LINK_FULL:
+										clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_logical->offset, layer_task->l->dev_t.r, s_logical->size, gen);
+										break;
 									}
-								}
-								else {
-									layer_t* next = t_logical->logical_head;
-									while (next) {
-										if (!next->delegate) {
-											link* next_link = next->next;
+									tasks++;
+									remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+									layer_task->done = true;
+									link* next_link = t_logical->next;
+									while (next_link) {
+										executable* n = new_executable(gen + 1, EXECUTE_LAYER, t_logical, next_link, next_link->t_layer);
+										append_executable(&layer_task_head, &layer_task_tail, n);
+										next_link = next_link->another_next;
+									}
+									if (t_logical != t_phisical) {
+										if (t_phisical->pulling_gen != gen) {
+											link* next_link = t_phisical->next;
 											while (next_link) {
-												executable* n = new_executable(gen + 1, EXECUTE_LAYER, next, next_link, next_link->layer);
+												executable* n = new_executable(gen + 1, EXECUTE_LAYER, t_phisical, next_link, next_link->t_layer);
 												append_executable(&layer_task_head, &layer_task_tail, n);
-												next_link = next_link->another;
+												next_link = next_link->another_next;
 											}
 										}
-										next->pulling_gen = gen;
-										next->pulling_batch = batch;
-										next = next->next_logical;
 									}
-								}
-								t_logical->pulling_gen = gen;
-								t_logical->pulling_batch = batch;
-								t_phisical->pulling_gen = gen;
-								t_phisical->pulling_batch = batch;
+									else {
+										layer_t* next = t_logical->logical_head;
+										while (next) {
+											if (!next->delegate) {
+												link* next_link = next->next;
+												while (next_link) {
+													executable* n = new_executable(gen + 1, EXECUTE_LAYER, next, next_link, next_link->t_layer);
+													append_executable(&layer_task_head, &layer_task_tail, n);
+													next_link = next_link->another_next;
+												}
+											}
+											next->pulling_gen = gen;
+											next->pulling_batch = batch;
+											next = next->next_logical;
+										}
+									}
+									t_logical->pulling_gen = gen;
+									t_logical->pulling_batch = batch;
+									t_phisical->pulling_gen = gen;
+									t_phisical->pulling_batch = batch;
 #ifdef DEBUG_SCHEDULE
-								fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "CPUL", s_logical->id, t_logical->id, t_phisical->cur_t_dev_t);
+									fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "CPUL", s_logical->id, t_logical->id, t_phisical->cur_t_dev_t);
 #endif
-							}
-							else if (t_logical->pulling_batch != batch) {
-								switch (layer_task->l->type) {
-								case LINK_FORWARD:
-									pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
-									break;
-								case LINK_FULL:
-									pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_logical->offset, layer_task->l->dev_t.r, s_logical->size, gen);
-									break;
 								}
-								tasks++;
-								remove_executable(&layer_task_head, &layer_task_tail, layer_task);
-								layer_task->done = true;
-								t_logical->pulling_batch = batch;
+								else if (t_logical->pulling_batch != batch) {
+									switch (layer_task->l->type) {
+									case LINK_FORWARD:
+										pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
+										break;
+									case LINK_FULL:
+										pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_logical->offset, layer_task->l->dev_t.r, s_logical->size, gen);
+										break;
+									}
+									tasks++;
+									remove_executable(&layer_task_head, &layer_task_tail, layer_task);
+									layer_task->done = true;
+									t_logical->pulling_batch = batch;
 #ifdef DEBUG_SCHEDULE
-								fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "PULL", s_logical->id, t_logical->id, t_phisical->cur_t_dev_t);
+									fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "PULL", s_logical->id, t_logical->id, t_phisical->cur_t_dev_t);
 #endif
+								}
 							}
-						}
-						if (layer_task->l->mutated_gen != gen) {
-							executable* n = new_executable(gen + 1, EXECUTE_LINK, s_logical, layer_task->l, layer_task->l->layer);
-							append_executable(&link_task_head, &link_task_tail, n);
-							layer_task->l->mutated_gen = gen;
 						}
 					}
+					break;
 				}
 			}
 			else {

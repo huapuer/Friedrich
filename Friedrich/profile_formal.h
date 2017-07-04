@@ -191,5 +191,5 @@ void external_input(executable** head, executable** tail, unsigned long long gen
 		cudaMemcpy(l->dev_t[l->cur_t_dev_t], l->t, l->size * sizeof(gen_t), cudaMemcpyHostToDevice);
 	}
 
-	prepend_executable(head, tail, new_executable(gen, EXECUTE_LAYER, l, l->next, l->next->layer));
+	prepend_executable(head, tail, new_executable(gen, EXECUTE_LAYER, l, l->next, l->next->t_layer));
 }
