@@ -161,6 +161,7 @@ void execute(int max_gen) {
 #endif
 			gen++;
 
+			external_output(gen);
 			external_input(&layer_task_head, &layer_task_tail, gen);
 		}
 
@@ -408,10 +409,6 @@ int main(int argc, char* argv[])
 	construct_network();
 
 	init_network();
-
-	friedrich_acts(net_events::EVENT_TEST, acts_test);
-
-	friedrich_talking(9999);
 
 	execute(200);
 

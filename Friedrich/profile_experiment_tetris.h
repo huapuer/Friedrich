@@ -5,6 +5,7 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include "../../Ludwig/Ludwig/ludwig_neural_network.h"
+#include "../../Ludwig/Ludwig/ludwig_net.h"
 #include "executable.h"
 
 struct map {
@@ -137,7 +138,19 @@ void construct_network() {
 	has_link(10, LINK_FULL, NULL, 3, NULL, 30);
 }
 
+//net
+void acts_state(char* c, int size) {
+	for (int i = 0; i < size; i++) {
+		printf("%c", c[i]);
+	}
+	printf("\n");
+}
+
 void init_network() {
+
+	alan_acts(net_events::EVENT_STATE, acts_state);
+	friedrich_talking(9999);
+
 	srand(time(NULL));
 
 	layer_t* next = pick_layer(0);
@@ -194,6 +207,14 @@ void external_input(executable** head, executable** tail, unsigned long long gen
 	}
 
 	prepend_executable(head, tail, new_executable(gen, EXECUTE_LAYER, l, l->next, l->next->t_layer));
+}
+
+void external_output(unsigned long long gen) {
+	layer_t* l = pick_layer(0);
+
+	if (gen % 10 == 0) {
+		friedrich_says(net_events::EVENT_MOVE_LEFT, nullptr, 0);
+	}
 }
 
 bool do_mutate(const unsigned long long gen) {
