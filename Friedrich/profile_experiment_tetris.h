@@ -83,41 +83,49 @@ __global__ void pull_forward(const float *s, float *t, int soffset, int toffset,
 	t[i] += s[j] * w[threadIdx.x];
 }
 
-__global__ void clear_pull_full(float *t, float* norm, int toffset, float* r, float* w, const int ss, const unsigned long long gen)
+__global__ void clear_pull_full(float *t, float* norm, float* out_b, float* out_a, int toffset, float* r, float* w, const int ss, const unsigned long long gen, bool out)
 {
 	int i = threadIdx.x + toffset;
 	t[i] = 0.0;
 	for (int j = 0; j < ss; j++) {
 		t[i] += r[threadIdx.x*ss + j] * w[threadIdx.x*ss + j];
 		norm[i] += t[i] * t[i];
+		if (out) {
+			out_b[i] += t[i];
+			out_a[i] += t[i] * t[i];
+		}
 	}
 }
 
-__global__ void pull_full(float *t, float* norm, int toffset, float* r, float* w, const int ss, const unsigned long long gen)
+__global__ void pull_full(float *t, float* norm, float* out_b, float* out_a, int toffset, float* r, float* w, const int ss, const unsigned long long gen, bool out)
 {
 	int i = threadIdx.x + toffset;
 	for (int j = 0; j < ss; j++) {
 		t[i] += r[threadIdx.x*ss + j] * w[threadIdx.x*ss + j];
 		norm[i] += t[i] * t[i];
+		if (out) {
+			out_b[i] += t[i];
+			out_a[i] += t[i] * t[i];
+		}
 	}
 }
 
 void construct_network() {
-	has_layer_phsical(0, 9);
+	has_layer_phsical(0, 9, false);
 
-	has_layer_phsical(1, 9);
+	has_layer_phsical(1, 9, false);
 	has_layer_logical(11, 1, 0, 3, false);
 	has_layer_logical(12, 1, 3, 3, false);
 	has_layer_logical(13, 1, 6, 3, false);
 
-	has_layer_phsical(21, 3);
+	has_layer_phsical(21, 3, false);
 	has_layer_logical(210, 21, 0, 3, true);
-	has_layer_phsical(22, 3);
+	has_layer_phsical(22, 3, false);
 	has_layer_logical(220, 22, 0, 3, true);
-	has_layer_phsical(23, 3);
+	has_layer_phsical(23, 3, false);
 	has_layer_logical(230, 23, 0, 3, true);
 
-	has_layer_phsical(3, 6);
+	has_layer_phsical(3, 6, false);
 	has_layer_logical(30, 3, 0, 6, true);
 	has_layer_logical(31, 3, 0, 2, false);
 	has_layer_logical(32, 3, 2, 2, false);
@@ -174,6 +182,14 @@ void init_network() {
 
 			cudaMalloc((void**)&next->lmbd.t, size * sizeof(float));
 			cudaMemcpy(next->dev_t[1].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
+
+			if (next->out) {
+				cudaMalloc((void**)&next->out_b.t, size * sizeof(float));
+				cudaMemcpy(next->dev_t[1].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
+
+				cudaMalloc((void**)&next->out_a.t, size * sizeof(float));
+				cudaMemcpy(next->dev_t[1].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
+			}
 		}
 		next = next->follow;
 	}
@@ -221,11 +237,33 @@ void external_input(executable** head, executable** tail, unsigned long long gen
 	prepend_executable(head, tail, new_executable(gen, EXECUTE_LAYER, l, l->next, l->next->t_layer));
 }
 
+float* out_b = nullptr;
+float* out_a = nullptr;
+unsigned long code = 0;
+
 void external_output(unsigned long long gen) {
 	layer_t* l = pick_layer(0);
 
+	if (out_b == nullptr) {
+		out_b = (float*)malloc(sizeof(float)*l->size);
+	}
+
+	if (out_a == nullptr) {
+		out_a = (float*)malloc(sizeof(float)*l->size);
+	}
+
+	cudaMemcpy(out_b, l->out_b.t, l->size * sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(out_a, l->out_a.t, l->size * sizeof(float), cudaMemcpyDeviceToHost);
+
+	for (int i = 0; i < l->size; i++) {
+		out_b[i] *= out_b[i];
+		if (out_b[i] / out_a[i] > 0.111) {
+			code += (1 << i);
+		}
+	}
+
 	if (gen % 10 == 0) {
-		friedrich_says(net_events::EVENT_MOVE_LEFT, nullptr, 0);
+		friedrich_says(net_events::EVENT_MOVE_LEFT, (char*)&code, sizeof(unsigned long));
 	}
 }
 

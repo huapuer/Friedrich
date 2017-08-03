@@ -275,7 +275,12 @@ void execute(int max_gen) {
 										clear_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
 										break;
 									case LINK_FULL:
-										clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen);
+										if (!t_phisical->out) {
+											clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, nullptr, nullptr, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen, false);
+										}
+										else {
+											clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, t_phisical->out_b.t, t_phisical->out_a.t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen, true);
+										}
 										break;
 									}
 									tasks++;
@@ -327,7 +332,12 @@ void execute(int max_gen) {
 										pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
 										break;
 									case LINK_FULL:
-										pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen);
+										if (!t_phisical->out) {
+											pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, nullptr, nullptr, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen, false);
+										}
+										else {
+											pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, t_phisical->out_b.t, t_phisical->out_a.t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen, true);
+										}
 										break;
 									}
 									tasks++;
