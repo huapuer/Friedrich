@@ -217,7 +217,12 @@ void execute(int max_gen) {
 					}
 					if (s_logical->integrated_gen != gen) {
 						if (s_phisical->integrated_gen != gen) {
-							integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t);
+							if (gen % 10 != 0) {
+								integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, nullptr, nullptr, false);
+							}
+							else {
+								integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_phisical->norm.t, s_phisical->lmbd.t, false);
+							}
 							layer_task->done = false;
 							tasks++;
 							s_phisical->integrated_gen = gen;
@@ -254,7 +259,7 @@ void execute(int max_gen) {
 									push_forward << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t);
 									break;
 								case LINK_FULL:
-									push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.pr, s_logical->size, t_logical->size);
+									push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_phisical->lmbd.t, s_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.pr, s_logical->size, t_logical->size);
 									break;
 								}
 								tasks++;
@@ -270,7 +275,7 @@ void execute(int max_gen) {
 										clear_pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
 										break;
 									case LINK_FULL:
-										clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen);
+										clear_pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen);
 										break;
 									}
 									tasks++;
@@ -322,7 +327,7 @@ void execute(int max_gen) {
 										pull_forward << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, t_phisical->dev_t[t_phisical->cur_t_dev_t].t, s_logical->offset, t_logical->offset, layer_task->l->dev_t.t, s_logical->size, gen);
 										break;
 									case LINK_FULL:
-										pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen);
+										pull_full << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> > (t_phisical->dev_t[t_phisical->cur_t_dev_t].t, t_phisical->norm.t, t_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.t, s_logical->size, gen);
 										break;
 									}
 									tasks++;

@@ -24,13 +24,17 @@ __global__ void joint(float* t, int toffset, float* r2, float* po) {
 	}
 }
 
-__global__ void integrate(float* s) {
+__global__ void integrate(float* s, float* norm, float* lmbd, bool do_norm) {
 	int i = threadIdx.x;
 	if (s[i] > 0.0) {
 		s[i] = 1.0;
 	}
 	else {
 		s[i] = -1.0;
+	}
+
+	if (do_norm) {
+		lmbd[i] = 100.0/*N*/ / norm[i];
 	}
 }
 
@@ -46,12 +50,12 @@ __global__ void push_forward(float* s) {
 	*/
 }
 
-__global__ void push_full(float* s, int soffset, float* r, float* pr, const int ss, const int ts) {
+__global__ void push_full(float* s, float* lmbd, int soffset, float* r, float* pr, const int ss, const int ts) {
 	for (int i = 0; i < ts; i++) {
 		int idx = i*ss + threadIdx.x;
 		r[idx] = s[threadIdx.x + soffset];
 		if (s[threadIdx.x + soffset] != r[idx]) {
-			r[idx] = s[threadIdx.x + soffset];
+			r[idx] = s[threadIdx.x + soffset] * lmbd[threadIdx.x + soffset];
 			pr[idx]++;
 		}
 	}
@@ -79,20 +83,22 @@ __global__ void pull_forward(const float *s, float *t, int soffset, int toffset,
 	t[i] += s[j] * w[threadIdx.x];
 }
 
-__global__ void clear_pull_full(float *t, int toffset, float* r, float* w, const int ss, const unsigned long long gen)
+__global__ void clear_pull_full(float *t, float* norm, int toffset, float* r, float* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
 	t[i] = 0.0;
 	for (int j = 0; j < ss; j++) {
 		t[i] += r[threadIdx.x*ss + j] * w[threadIdx.x*ss + j];
+		norm[i] += t[i] * t[i];
 	}
 }
 
-__global__ void pull_full(float *t, int toffset, float* r, float* w, const int ss, const unsigned long long gen)
+__global__ void pull_full(float *t, float* norm, int toffset, float* r, float* w, const int ss, const unsigned long long gen)
 {
 	int i = threadIdx.x + toffset;
 	for (int j = 0; j < ss; j++) {
 		t[i] += r[threadIdx.x*ss + j] * w[threadIdx.x*ss + j];
+		norm[i] += t[i] * t[i];
 	}
 }
 
@@ -161,6 +167,12 @@ void init_network() {
 			cudaMalloc((void**)&next->dev_t[0].t, size * sizeof(float));
 			cudaMemcpy(next->dev_t[0].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
 			cudaMalloc((void**)&next->dev_t[1].t, size * sizeof(float));
+			cudaMemcpy(next->dev_t[1].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
+
+			cudaMalloc((void**)&next->norm.t, size * sizeof(float));
+			cudaMemcpy(next->dev_t[1].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
+
+			cudaMalloc((void**)&next->lmbd.t, size * sizeof(float));
 			cudaMemcpy(next->dev_t[1].t, next->host_t.t, size * sizeof(float), cudaMemcpyHostToDevice);
 		}
 		next = next->follow;
