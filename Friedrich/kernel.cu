@@ -144,7 +144,7 @@ void execute(int max_gen) {
 	layer_t* updated_layer_head = NULL;
 	layer_t* updated_layer_tail = NULL;
 
-	external_input(&layer_task_head, &layer_task_tail, gen);
+	external(&layer_task_head, &layer_task_tail, gen);
 
 	while (layer_task_head) {
 		//critical region begin
@@ -161,8 +161,7 @@ void execute(int max_gen) {
 #endif
 			gen++;
 
-			external_output(gen);
-			external_input(&layer_task_head, &layer_task_tail, gen);
+			external(&layer_task_head, &layer_task_tail, gen);
 		}
 
 		executable* layer_task = layer_task_head;

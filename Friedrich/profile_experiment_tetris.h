@@ -5,7 +5,7 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include "../../Ludwig/Ludwig/ludwig_neural_network.h"
-#include "../../Ludwig/Ludwig/ludwig_net.h"
+#include "../../Ludwig/Ludwig/ludwig_net_sync.h"
 #include "executable.h"
 
 struct map {
@@ -152,17 +152,22 @@ void construct_network() {
 	has_link(10, LINK_FULL, NULL, 3, NULL, 30);
 }
 
-//net
-void acts_state(char* c, int size) {
-	for (int i = 0; i < size; i++) {
-		printf("%c", c[i]);
+void external_input(char* content, int size) {
+	layer_t* l = pick_layer(0);
+
+	if (l->size * sizeof(float) == size) {
+		cudaMemcpy(l->dev_t[l->cur_t_dev_t].t, content, l->size * sizeof(float), cudaMemcpyHostToDevice);
+		cudaMemcpy(l->dev_t[l->cur_s_dev_t].t, content, l->size * sizeof(float), cudaMemcpyHostToDevice);
 	}
-	printf("\n");
+	else {
+		printf("external input error!");
+		exit(1);
+	}
 }
 
 void init_network() {
 
-	alan_acts(net_events::EVENT_STATE, acts_state);
+	friedrich_acts(net_events::EVENT_STATE, external_input);
 	friedrich_talking(9999);
 
 	srand(time(NULL));
@@ -219,51 +224,38 @@ void init_network() {
 	}
 }
 
-void external_input(executable** head, executable** tail, unsigned long long gen) {
-	layer_t* l = pick_layer(0);
-
-	if (gen == 1) {
-		srand(time(NULL));
-
-		int size = l->size;
-		for (int i = 0; i < size; i++) {
-			//l->t[i].t = float(rand()) / float(RAND_MAX) - 0.5f;
-			l->host_t.t[i] = 0.1 + i / (size / 3) * 0.1;
-		}
-		cudaMemcpy(l->dev_t[l->cur_t_dev_t].t, l->host_t.t, l->size * sizeof(float), cudaMemcpyHostToDevice);
-		cudaMemcpy(l->dev_t[l->cur_s_dev_t].t, l->host_t.t, l->size * sizeof(float), cudaMemcpyHostToDevice);
-	}
-
-	prepend_executable(head, tail, new_executable(gen, EXECUTE_LAYER, l, l->next, l->next->t_layer));
-}
-
 float* out_b = nullptr;
 float* out_a = nullptr;
 unsigned long code = 0;
 
-void external_output(unsigned long long gen) {
-	layer_t* l = pick_layer(0);
-
-	if (out_b == nullptr) {
-		out_b = (float*)malloc(sizeof(float)*l->size);
-	}
-
-	if (out_a == nullptr) {
-		out_a = (float*)malloc(sizeof(float)*l->size);
-	}
-
-	cudaMemcpy(out_b, l->out_b.t, l->size * sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(out_a, l->out_a.t, l->size * sizeof(float), cudaMemcpyDeviceToHost);
-
-	for (int i = 0; i < l->size; i++) {
-		out_b[i] *= out_b[i];
-		if (out_b[i] / out_a[i] > 0.111) {
-			code += (1 << i);
-		}
-	}
-
+void external(executable** head, executable** tail, unsigned long long gen) {
 	if (gen % 10 == 0) {
-		friedrich_says(net_events::EVENT_MOVE_LEFT, (char*)&code, sizeof(unsigned long));
+		layer_t* out = pick_layer(0);
+
+		if (out_b == nullptr) {
+			out_b = (float*)malloc(sizeof(float)*out->size);
+		}
+
+		if (out_a == nullptr) {
+			out_a = (float*)malloc(sizeof(float)*out->size);
+		}
+
+		cudaMemcpy(out_b, out->out_b.t, out->size * sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(out_a, out->out_a.t, out->size * sizeof(float), cudaMemcpyDeviceToHost);
+
+		for (int i = 0; i < out->size; i++) {
+			out_b[i] *= out_b[i];
+			if (out_b[i] / out_a[i] > 0.111) {
+				code += (1 << i);
+			}
+		}
+
+		friedrich_says(net_events(code), (char*)&code, sizeof(unsigned long));
+
+		friedrich_hearing();
+
+		layer_t* in = pick_layer(0);
+		prepend_executable(head, tail, new_executable(gen, EXECUTE_LAYER, in, in->next, in->next->t_layer));
 	}
 }
 
