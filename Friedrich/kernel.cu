@@ -258,7 +258,7 @@ void execute(int max_gen) {
 									push_forward << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t);
 									break;
 								case LINK_FULL:
-									push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_phisical->lmbd.t, s_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.pr, s_logical->size, t_logical->size);
+									push_full << <s_logical->size / thread_num + 1, s_logical->size>thread_num ? thread_num : s_logical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_logical->offset, layer_task->l->dev_t.r, layer_task->l->dev_t.pr, s_logical->size, t_logical->size);
 									break;
 								}
 								tasks++;

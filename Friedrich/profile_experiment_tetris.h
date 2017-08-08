@@ -18,20 +18,16 @@ __constant__ map w_mutes;
 
 __global__ void joint(float* t, int toffset, float* r2, float* po) {
 	int i = threadIdx.x + toffset;
-	if (r2[i] != t[i]) {
-		r2[i] = t[i];
-		po[i]++;
-	}
+
+	float diff = t[i] - r2[i];
+	po[i] += diff*diff;
+	r2[i] = t[i];
 }
 
 __global__ void integrate(float* s, float* norm, float* lmbd, bool do_norm) {
 	int i = threadIdx.x;
-	if (s[i] > 0.0) {
-		s[i] = 1.0;
-	}
-	else {
-		s[i] = -1.0;
-	}
+
+	s[i] *= lmbd[i];
 
 	if (do_norm) {
 		lmbd[i] = 100.0/*N*/ / norm[i];
@@ -50,20 +46,19 @@ __global__ void push_forward(float* s) {
 	*/
 }
 
-__global__ void push_full(float* s, float* lmbd, int soffset, float* r, float* pr, const int ss, const int ts) {
+__global__ void push_full(float* s, int soffset, float* r, float* pr, const int ss, const int ts) {
 	for (int i = 0; i < ts; i++) {
 		int idx = i*ss + threadIdx.x;
+
+		float diff = s[threadIdx.x + soffset] - r[idx];
+		pr[idx] += diff * diff;
 		r[idx] = s[threadIdx.x + soffset];
-		if (s[threadIdx.x + soffset] != r[idx]) {
-			r[idx] = s[threadIdx.x + soffset] * lmbd[threadIdx.x + soffset];
-			pr[idx]++;
-		}
 	}
 }
 
 __global__ void mutate(float* w, float* pr, float* po, const unsigned long long gen) {
 	int i = threadIdx.x;
-	w[i] *= 1.0 + (0.5 - pr[i] / po[i]);
+	w[i] *= 1.0 + (0.5 - pr[i] / po[i]);	/*TO FIX*/
 	pr[i] = 0;
 	po[i] = 0;
 }
