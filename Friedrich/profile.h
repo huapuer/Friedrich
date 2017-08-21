@@ -3,12 +3,17 @@
 #define DEBUG_SCHEDULE
 #define DEBUG_DATA
 
-#define PROFILE_EXPERIMENT_TETRIS
+#define PROFILE_EXPERIMENT_TETRIS2
+//#define PROFILE_EXPERIMENT_TETRIS
 //#define PROFILE_TEST_NEURON
 //#define PROFILE_TEST_SYNAPASE
 //#define PROFILE_TEST_INTEGRATE
 //#define PROFILE_TEST_MUTATE
 //#define PROFILE_TEST_NEURON2
+
+#ifdef PROFILE_EXPERIMENT_TETRIS2
+#include "profile_experiment_tetris2.h"
+#endif // PROFILE_EXPERIMENT_TETRIS2
 
 #ifdef PROFILE_EXPERIMENT_TETRIS
 #include "profile_experiment_tetris.h"
