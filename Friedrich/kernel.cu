@@ -10,6 +10,7 @@ TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug), 部分完成，增加
 TODO: 增加不同连接方式（1:1/n:n）
 TODO: 增加不更新权重连接支持（mute_fn为NULL）
 */
+#include "stdfx.h"
 #include <stdio.h>
 #include "mpi.h" 
 #include <Windows.h>
@@ -24,8 +25,6 @@ TODO: 增加不更新权重连接支持（mute_fn为NULL）
 
 #include "net.h"
 #include "profile.h"
-
-#define ERROR(format,...) do{fprintf(stderr,format,##__VA_ARGS__);system("pause");exit(1);}while(0)
 
 typedef void(*fp_integrate)(gen_t*, int);
 typedef void(*fp_mute)(gen_w*, const unsigned long long);
@@ -422,15 +421,11 @@ int main(int argc, char* argv[])
 	cudaGetDeviceProperties(&properties, 0);
 	thread_num = properties.maxThreadsPerBlock;
 
-	w_mutes.size = 10;
-	float host_t[10] = { 1.0 };
-	cudaMemcpyToSymbol(w_mutes.dev_t, &host_t, w_mutes.size * sizeof(gen_w));
-
 	construct_network();
 
 	init_network();
 
-	execute(200);
+	execute(MAXLONG64);
 
 	// Copy output vector from GPU buffer to host memory.
 	//cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
