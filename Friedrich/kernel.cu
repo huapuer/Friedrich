@@ -1,15 +1,3 @@
-/*
-TODO: 激发函数，初始值
-TODO: HEBB权重增强
-
-DESG: 加入逻辑层，逻辑层引用物理层的一部分或全部数据
-	  物理层持有引用自己的逻辑层的引用，物理层被更新时负责同步更新逻辑层状态，并检查逻辑层输出并添加任务到调度器
-DESG: Host Scheduler与Slave Batch进行解耦，实现Host与Slave并行作业，隐藏Host端调度开销
-
-TODO: 增加物理层与所属逻辑层之间的状态同步逻辑(scheduling debug), 部分完成，增加子逻辑层输出情况测试(layer1->t_layer2)
-TODO: 增加不同连接方式（1:1/n:n）
-TODO: 增加不更新权重连接支持（mute_fn为NULL）
-*/
 #include "stdfx.h"
 #include <stdio.h>
 #include "mpi.h" 
@@ -172,9 +160,9 @@ void execute(int max_gen) {
 				case EXECUTE_JOINT:
 					if (layer_task->s->integrating_batch != batch) {
 						//joint << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> >(t_logical->dev_t[t_logical->cur_s_dev_t].t, t_logical->offset, layer_task->l->dev_t.r2, layer_task->l->dev_t.po);
-						joint << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> >(t_logical->dev_t[t_logical->cur_s_dev_t].t, t_logical->offset, layer_task->l->dev_t.r2, layer_task->l->dev_t.po, layer_task->l->dev_t.po_sum, true, layer_task->s->out_a.t, layer_task->s->out_b.t);
+						joint << <t_logical->size / thread_num + 1, t_logical->size>thread_num ? thread_num : t_logical->size, 0, streams[tasks] >> >(t_logical->dev_t[t_logical->cur_s_dev_t].t, t_logical->offset, layer_task->l->dev_t.r2, layer_task->l->dev_t.po, layer_task->l->dev_t.po_sum, true, s_phisical->out_a.t, s_phisical->out_b.t);
 #ifdef DEBUG_SCHEDULE
-						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "CUNT", s_logical->id, t_logical->id, s_logical->cur_s_dev_t);
+						fprintf(stdout, "GEN:%d BATCH:%d JOB:%s FROM:%d TO:%d BUFF:%d\n", gen, batch, "JONT", s_logical->id, t_logical->id, s_logical->cur_s_dev_t);
 #endif
 						//tasks++;
 
@@ -219,7 +207,7 @@ void execute(int max_gen) {
 						if (s_phisical->integrated_gen != gen) {
 							if (gen % 10 != 0) {
 								//integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, nullptr, nullptr, false);
-								integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_phisical->lmbd.t);
+								integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_phisical->lmbd.t, s_phisical->size);
 							}
 							else {
 								//integrate << <s_phisical->size / thread_num + 1, s_phisical->size>thread_num ? thread_num : s_phisical->size, 0, streams[tasks] >> > (s_phisical->dev_t[s_phisical->cur_s_dev_t].t, s_phisical->norm.t, s_phisical->lmbd.t, false);

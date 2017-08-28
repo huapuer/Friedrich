@@ -1,8 +1,5 @@
 #pragma once
 
-#define DEBUG_SCHEDULE
-//#define DEBUG_DATA
-
 #define PROFILE_EXPERIMENT_TETRIS2
 //#define PROFILE_EXPERIMENT_TETRIS
 //#define PROFILE_TEST_NEURON
